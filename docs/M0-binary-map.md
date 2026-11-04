@@ -58,8 +58,50 @@ few percent error until switch tables and tail calls are handled properly.
   - match against other RenderWare 3.6 PS2 titles that shipped with symbols;
   - build our own fingerprints from RenderWare's documented behaviour (librw
     and re3 are references for structure layouts).
-- **Pin the GameMonkey version** from the bytecode header and the opcode
-  table, then test the scripts against upstream GM.
 - **Analyse the IOP side** (`HIS.IRX`, the sound driver) to define the audio
   HLE interface.
 - **Classify the unclassified block** at `0x2648f0–0x26ad80`.
+
+## GameMonkey Script: verified
+
+`tools/analysis/gmcheck.py extracted/data` validates every script with no errors:
+
+- 592 files, 2,980 functions, 181,214 instructions.
+- No debug info is included, so there are no source or line tables.
+
+Verification method: each script was checked against the **GameMonkey 1.2x
+bytecode set**, using the 56 opcodes from `BC_GETDOT = 0` to `BC_FORK = 55`.
+The check uses the library layout from upstream `gmLibHooks.cpp`: the `gml0`
+header, the string table, and `func` records. For every instruction it confirms:
+
+- the opcode is known;
+- branch targets land on instruction boundaries;
+- string and symbol operands point to the start of a string-table entry;
+- `PUSHFN` operands name an existing function.
+
+Reference used: the 1.28 tree at github.com/mrozbarry/gamemonkey-unofficial.
+
+To see a script's bytecode: `python -I tools/analysis/gmcheck.py x -v <file.gm>`.
+
+Consequences for the port:
+
+- **The original scripts can run on native, open-source GameMonkey.** The
+  script VM does not need recompiling.
+- **Operands are 4 bytes in the files.** The upstream loader assumes operands
+  are pointer-sized (`gmptr`). A 64-bit build therefore needs a small loader
+  patch that widens operands to 8 bytes and fixes up branch offsets.
+  Alternatively, build GM with 32-bit operand storage.
+- **Native API.** Scripts read 95 globals they never assign. Removing GM's own
+  standard library (`print`, `sleep`, `yield`, `thread`, `sin`, ...) leaves
+  about 70 engine bindings:
+  - camera: `CameraFadeIn`, `CameraFadeOut`, `CameraPush`, ...
+  - objects: `CreateObject`, `GetObject`, `SetState`, ...
+  - sound: `PlaySound`, `MusicManager`, ...
+  - zones and loading: `LoadZoneGroup`, `LoadLockBegin`, ...
+  - HUD and report card: `HudCommand`, `ReportCardAddPoints`, ...
+  - input: `JNGetPadAxis`, `JNSetPadRumble`, ...
+
+  Methods called on objects through `GETDOT` are additional surface that has
+  not been catalogued yet.
+- **Opcodes the scripts never use:** BOR, BXOR, SHL, SHR, BINV, POS, NOP, LINE,
+  DUP2, SWAP, FORK.
