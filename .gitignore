@@ -9,3 +9,6 @@ build/
 __pycache__/
 # generated analysis output (derived from the game executable)
 analysis/
+
+# build output
+recomp/build/
