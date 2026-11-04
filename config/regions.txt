@@ -5,6 +5,7 @@
 # kind: ee   = Emotion Engine code (recompile or HLE)
 #       vu   = VU microcode embedded in .text (never recompile as EE)
 #       data = initialised data / zero-filled data
+#       kstub = EE code embedded in .data (kernel patch stubs) - HLE, never recompiled
 # confidence: high = confirmed by strings/plugin IDs; med = inferred from call graph; low = guess
 00100000  00100218  ee    high  crt0 / entry point (0x100008)
 00100218  0012c000  ee    high  Sony EE libraries: libgraph, libdma, libipu+libmpeg, libkernl, sif/stdio, libcdvd, libpad, libmc, libscf
@@ -19,6 +20,6 @@
 00369900  0036ef00  ee    med   Game code C (Flash/SWF UI player, FMV module, save game)
 0036ef00  0039acc0  vu    high  VU1 microcode (RW Sky2 / PS2All render programs), ~176 KB
 0039acc0  0039b270  data  high  .data start (Sony lib version tags: PsIIlibgraph3000 at 0x39ad00 ...)
-0039b270  0039c5e8  ee    low   EE code inside .data - likely libkernl stubs copied into kernel at runtime
+0039b270  0039c5e8  kstub low   EE code inside .data - likely libkernl stubs copied into kernel at runtime
 0039c5e8  0047fff0  data  high  .data / .rodata (RW $Id strings 0x4764e7..)
 0047fff0  005ab700  data  high  zero-initialised data stored in file (RW globals around 0x5a0000)

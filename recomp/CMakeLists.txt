@@ -14,5 +14,7 @@ add_executable(twonkrecomp
   src/main.cpp
   src/image.cpp
   src/r5900.cpp
+  src/codegen.cpp
+  src/analysis.cpp
 )
 target_include_directories(twonkrecomp PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../runtime/include)

@@ -12,3 +12,4 @@ analysis/
 
 # build output
 recomp/build/
+build/
