@@ -5,6 +5,7 @@
 # kind: ee   = Emotion Engine code (recompile or HLE)
 #       vu   = VU microcode embedded in .text (never recompile as EE)
 #       data = initialised data / zero-filled data
+#       ptrs = table of function pointers; every word is a function entry
 #       kstub = EE code embedded in .data (kernel patch stubs) - HLE, never recompiled
 # confidence: high = confirmed by strings/plugin IDs; med = inferred from call graph; low = guess
 00100000  00100218  ee    high  crt0 / entry point (0x100008)
@@ -21,5 +22,8 @@
 0036ef00  0039acc0  vu    high  VU1 microcode (RW Sky2 / PS2All render programs), ~176 KB
 0039acc0  0039b270  data  high  .data start (Sony lib version tags: PsIIlibgraph3000 at 0x39ad00 ...)
 0039b270  0039c5e8  kstub low   EE code inside .data - likely libkernl stubs copied into kernel at runtime
-0039c5e8  0047fff0  data  high  .data / .rodata (RW $Id strings 0x4764e7..)
+0039c5e8  0047b680  data  high  .data / .rodata (RW $Id strings 0x4764e7..)
+0047b680  0047bbc0  ee    high  Static constructors (__sinit_*) placed before .ctors; called by crt at 0x100670
+0047bbc0  0047bbfc  ptrs  high  .ctors: static constructor table (every word is a function entry)
+0047bbfc  0047fff0  data  high  .dtors and more data
 0047fff0  005ab700  data  high  zero-initialised data stored in file (RW globals around 0x5a0000)

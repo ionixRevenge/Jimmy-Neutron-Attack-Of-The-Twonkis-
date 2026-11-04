@@ -188,3 +188,13 @@ constexpr uint32_t kFcrC = 1u << 23;   // FPU condition bit in FCR31
 #define S32(n) ctx->r[n].s32[0]
 #define FPR(n) ctx->f[n]
 #define ADDR(base, off) ((uint32_t)(U32(base) + (int32_t)(off)))
+
+// Optional function-entry tracing (build the game library with PS2_TRACE=1).
+namespace ps2 { void trace_enter(Context* ctx, uint32_t addr); }
+#if defined(PS2_TRACE) && PS2_TRACE
+#define PS2_FN_ENTER(addr) ps2::trace_enter(ctx, addr)
+#else
+#define PS2_FN_ENTER(addr) ((void)0)
+#endif
+
+#include "ps2/exec_impl.hpp"

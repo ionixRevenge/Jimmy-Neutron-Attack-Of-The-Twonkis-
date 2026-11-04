@@ -9,16 +9,39 @@ namespace recomp {
 
 using r5900::Op;
 
-std::vector<Function> refine_functions(const Image& img, const std::vector<Function>& in, RefineStats* st) {
+std::vector<Function> refine_functions(const Image& img, const std::vector<Function>& in, RefineStats* st,
+                                       const std::set<uint32_t>& forced) {
     *st = RefineStats{};
     st->input = in.size();
     if (in.empty()) return {};
 
     std::vector<Function> fns = in;
     std::sort(fns.begin(), fns.end(), [](const Function& a, const Function& b) { return a.start < b.start; });
+    // Tail calls: a `j` that leaves its function targets a real entry point.
+    std::set<uint32_t> entries(forced.begin(), forced.end());
+    for (const auto& fn : fns)
+        for (uint32_t pc = fn.start; pc < fn.end; pc += 4) {
+            const auto insn = r5900::decode(pc, img.read32(pc));
+            if (insn.op != Op::J && insn.op != Op::JAL) continue;
+            const uint32_t t = insn.jump_target();
+            if (insn.op == Op::JAL || t < fn.start || t >= fn.end)   // calls always; jumps when they leave
+                if (t >= fns.front().start && t < fns.back().end) entries.insert(t);
+        }
+    // split candidates at forced entries
+    for (uint32_t a : entries) {
+        for (size_t i = 0; i < fns.size(); ++i) {
+            if (a > fns[i].start && a < fns[i].end) {
+                Function tail{a, fns[i].end};
+                fns[i].end = a;
+                fns.insert(fns.begin() + i + 1, tail);
+                break;
+            }
+        }
+    }
 
     // Strong entries: program entry and every jal target.
     std::set<uint32_t> strong{img.entry()};
+    strong.insert(entries.begin(), entries.end());
     for (const auto& fn : fns)
         for (uint32_t pc = fn.start; pc < fn.end; pc += 4) {
             const auto insn = r5900::decode(pc, img.read32(pc));

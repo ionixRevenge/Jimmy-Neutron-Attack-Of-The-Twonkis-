@@ -1,6 +1,7 @@
 // Function boundary refinement.
 #pragma once
 #include <cstdint>
+#include <set>
 #include <vector>
 
 #include "image.hpp"
@@ -18,6 +19,9 @@ struct RefineStats {
 // jal targets) whenever intra-procedural branches cross them. Iterates to a fixpoint.
 // Branching out of a function to a non-entry address would otherwise need a tail
 // call into the middle of code, which turns loops into unbounded recursion.
-std::vector<Function> refine_functions(const Image& img, const std::vector<Function>& in, RefineStats* st);
+// `forced` addresses (e.g. HLE replacements) always become function entries, split out of
+// whatever candidate contains them, and are never merged away.
+std::vector<Function> refine_functions(const Image& img, const std::vector<Function>& in, RefineStats* st,
+                                       const std::set<uint32_t>& forced = {});
 
 } // namespace recomp

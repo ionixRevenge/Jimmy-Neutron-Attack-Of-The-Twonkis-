@@ -1,0 +1,5 @@
+# Guest functions replaced by native implementations (namespace hle in runtime/src/hle_*.cpp).
+# <guest_addr_hex>  <native_function_name>
+00117948  kernel_patch_noop      # libkernl BIOS kernel patcher (_InitSys)
+00118010  kernel_store_word      # libkernl kernel-mode "sw a1,(a0)" via eret
+00117070  kernel_patch2_noop     # libkernl kernel-code install + SetSyscall patches (_InitSys)

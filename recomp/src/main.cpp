@@ -2,11 +2,14 @@
 //
 //   twonkrecomp disasm   <elf> <addr_hex> [count]
 //   twonkrecomp coverage <elf> <regions.txt>
-//   twonkrecomp gen      <elf> <regions.txt> <functions.tsv> <out_dir>
+//   twonkrecomp gen      <elf> <regions.txt> <functions.tsv> <out_dir> [hle.txt]
 //   twonkrecomp fn       <elf> <regions.txt> <functions.tsv> <addr_hex>   (print one function)
 #include <cstdio>
 #include <cstdlib>
+#include <fstream>
 #include <map>
+#include <set>
+#include <sstream>
 #include <string>
 
 #include <algorithm>
@@ -134,11 +137,48 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "error: %s\n", err.c_str());
             return 1;
         }
+        // optional HLE override list: "<addr_hex> <native_name>" per line, '#' comments
+        std::map<uint32_t, std::string> hle;
+        if (argc >= 7) {
+            std::ifstream hf(argv[6]);
+            if (!hf) { std::fprintf(stderr, "error: cannot open %s\n", argv[6]); return 1; }
+            std::string line;
+            while (std::getline(hf, line)) {
+                if (line.empty() || line[0] == '#') continue;
+                std::istringstream ss(line);
+                std::string a, name;
+                if (ss >> a >> name) hle[(uint32_t)std::stoul(a, nullptr, 16)] = name;
+            }
+        }
+        std::set<uint32_t> forced;   // HLE replacements are always function entries
+        for (const auto& kv : hle) forced.insert(kv.first);
         RefineStats rs;
-        auto funcs = refine_functions(img, ee_functions(all, regions), &rs);
+        // Code pointers stored in data that land on a stack-allocating prologue
+        // (ctor tables, vtables, callbacks) are function entries.
+        const auto ptrs = data_code_pointers(img, regions);
+        for (uint32_t p : ptrs)
+            if ((img.read32(p) >> 16) == 0x27BD && (img.read32(p) & 0x8000)) forced.insert(p);
+        // explicit function-pointer tables (e.g. .ctors): every non-null word is an entry
+        for (const auto& r : regions)
+            if (r.kind == "ptrs")
+                for (uint32_t a = r.start; a + 4 <= r.end; a += 4)
+                    if (uint32_t v = img.read32(a)) forced.insert(v);
+        // EE regions the candidate list knows nothing about get one candidate spanning them
+        auto cands = ee_functions(all, regions);
+        for (const auto& r : regions) {
+            if (r.kind != "ee") continue;
+            const bool covered = std::any_of(cands.begin(), cands.end(), [&](const Function& f) { return f.start == r.start; });
+            if (covered || std::any_of(cands.begin(), cands.end(), [&](const Function& f) { return f.start < r.start && f.end > r.start; }))
+                continue;
+            uint32_t end = r.end;   // stop at the first known function inside the region
+            for (const auto& f : cands)
+                if (f.start > r.start && f.start < end) end = f.start;
+            cands.push_back({r.start, end});
+        }
+        auto funcs = refine_functions(img, cands, &rs, forced);
         std::fprintf(stderr, "functions: %zu candidates, %zu strong entries, %zu merges -> %zu functions, %zu residual cross-branches\n",
                      rs.input, rs.strong, rs.merges, rs.output, rs.residual_cross);
-        CodeGen gen(img, funcs, data_code_pointers(img, regions));
+        CodeGen gen(img, funcs, data_code_pointers(img, regions), hle);
         GenStats st;
         if (cmd == "fn") {
             const uint32_t a = (uint32_t)std::strtoul(argv[5], nullptr, 16);

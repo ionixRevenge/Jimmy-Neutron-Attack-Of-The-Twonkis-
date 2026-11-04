@@ -1,6 +1,7 @@
 // C++ code generation from decoded R5900 functions.
 #pragma once
 #include <cstdint>
+#include <map>
 #include <set>
 #include <string>
 #include <vector>
@@ -10,7 +11,7 @@
 namespace recomp {
 
 struct GenStats {
-    uint64_t functions = 0, instructions = 0;
+    uint64_t functions = 0, instructions = 0, hle = 0;
     uint64_t inlined = 0;          // emitted as plain C++
     uint64_t hooked = 0;           // emitted as ps2::exec<Op::X>
     uint64_t invalid = 0;
@@ -26,7 +27,8 @@ struct GenOptions {
 
 class CodeGen {
 public:
-    CodeGen(const Image& img, std::vector<Function> funcs, const std::vector<uint32_t>& data_code_ptrs);
+    CodeGen(const Image& img, std::vector<Function> funcs, const std::vector<uint32_t>& data_code_ptrs,
+            std::map<uint32_t, std::string> hle = {});
 
     bool generate(const GenOptions& opt, GenStats* stats, std::string* err);
 
@@ -43,6 +45,7 @@ private:
     std::vector<Function> funcs_;
     std::set<uint32_t> starts_;
     std::vector<uint32_t> data_code_ptrs_;   // sorted; code addresses stored in data (jump tables, vtables)
+    std::map<uint32_t, std::string> hle_;    // guest function -> native replacement (namespace hle)
 };
 
 std::string fn_name(uint32_t addr);
