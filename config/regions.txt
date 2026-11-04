@@ -1,0 +1,24 @@
+# SLUS_208.87 (SHA-1 3dc783935b4a853ad42f97a6c1697aae128ffca3) address-space map.
+# Consumed by tools/analysis/regions.py and, later, by the recompiler.
+#
+# start     end       kind   confidence  label
+# kind: ee   = Emotion Engine code (recompile or HLE)
+#       vu   = VU microcode embedded in .text (never recompile as EE)
+#       data = initialised data / zero-filled data
+# confidence: high = confirmed by strings/plugin IDs; med = inferred from call graph; low = guess
+00100000  00100218  ee    high  crt0 / entry point (0x100008)
+00100218  0012c000  ee    high  Sony EE libraries: libgraph, libdma, libipu+libmpeg, libkernl, sif/stdio, libcdvd, libpad, libmc, libscf
+0012c000  00133000  ee    med   Metrowerks MSL C runtime (printf family, string, math) mixed with first game objects
+00133000  001f9688  ee    med   Game code A (includes GameMonkey Script VM ~0x17b000-0x190000)
+001f9688  00224000  ee    high  RenderWare 3.6 core / world / plugins (HAnim 0x1ffa60, MatFX 0x2010b0, PTank 0x2115a8)
+00224000  00234000  ee    high  VU0 macro-mode math (COP2 0x4B...), no data refs - needs SSE translation
+00234000  002648f0  ee    high  RenderWare 3.6 continued (UVAnim 0x23bbe0, Sky2/PS2All pipelines 0x24f000)
+002648f0  0026ad80  ee    low   Unclassified: leaf functions, no RW calls (MSL math? RW internals?)
+0026ad80  00349d50  ee    med   Game code B (entities, AI, Goddard, bosses, UI, save system)
+00349d50  00369900  ee    med   RenderWare toolkits: Rt2d, Rt2dAnim, fonts (.met), PITexDict
+00369900  0036ef00  ee    med   Game code C (Flash/SWF UI player, FMV module, save game)
+0036ef00  0039acc0  vu    high  VU1 microcode (RW Sky2 / PS2All render programs), ~176 KB
+0039acc0  0039b270  data  high  .data start (Sony lib version tags: PsIIlibgraph3000 at 0x39ad00 ...)
+0039b270  0039c5e8  ee    low   EE code inside .data - likely libkernl stubs copied into kernel at runtime
+0039c5e8  0047fff0  data  high  .data / .rodata (RW $Id strings 0x4764e7..)
+0047fff0  005ab700  data  high  zero-initialised data stored in file (RW globals around 0x5a0000)

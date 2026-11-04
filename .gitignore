@@ -7,3 +7,5 @@ extracted/
 SLUS_*
 build/
 __pycache__/
+# generated analysis output (derived from the game executable)
+analysis/
