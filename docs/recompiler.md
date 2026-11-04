@@ -54,6 +54,17 @@ cmake --build build/msvc --config Release --target twonk_game --parallel
      inlined specializations constant-fold. The primary template traps, so a
      missing implementation fails loudly at runtime and never silently.
 
+## Build result (2026-11-04)
+
+The whole executable, with all 636k instructions, compiles cleanly with MSVC
+2022 at `/O2`.
+
+- **Output:** 31 MB of generated C++ in 21 files, building a 24 MB
+  `twonk_game.lib`.
+- **Time:** 2 min 11 s using 8 parallel jobs. This is a first estimate for the
+  launcher's one-time "build the game" step on a user's PC.
+- **Generation:** about 0.5 s.
+
 ## Semantics notes
 
 - **GPRs** are 128-bit (`ps2::u128`). 32-bit ops sign-extend into the low
