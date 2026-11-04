@@ -1,0 +1,9 @@
+# Copyrighted game data - never commit
+Game iso/
+*.iso
+extracted/
+*.PAK
+*.pak
+SLUS_*
+build/
+__pycache__/
