@@ -1,6 +1,6 @@
 // twonk.exe: loads SLUS_208.87 into guest RAM and runs the recompiled code.
 //
-//   twonk <SLUS_208.87> [--log kernel,mem,cpu,hle,boot]
+//   twonk <SLUS_208.87> [--log kernel,mem,cpu,hle,boot,iop|all]
 #include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
@@ -8,6 +8,8 @@
 #include <fstream>
 #include <string>
 #include <vector>
+#include <chrono>
+#include <thread>
 
 #include "ps2/recomp.hpp"
 #include "ps2/runtime.hpp"
@@ -17,13 +19,14 @@ void f_00100008(ps2::Context* ctx);   // ELF entry point (generated)
 namespace ps2 {
 
 static unsigned g_log_mask = 1u << (int)Log::Boot;
+static const char* const kLogNames[] = {"kernel", "mem", "cpu", "hle", "boot", "iop"};
+constexpr int kLogCount = 6;
 
 bool log_enabled(Log ch) { return (g_log_mask >> (int)ch) & 1u; }
 
 void log(Log ch, const char* fmt, ...) {
     if (!log_enabled(ch)) return;
-    static const char* const kNames[] = {"kernel", "mem", "cpu", "hle", "boot"};
-    std::fprintf(stderr, "[%s] ", kNames[(int)ch]);
+    std::fprintf(stderr, "[%s] ", kLogNames[(int)ch]);
     va_list ap;
     va_start(ap, fmt);
     std::vfprintf(stderr, fmt, ap);
@@ -73,15 +76,14 @@ static bool load_elf_into_ram(const char* path, ps2::Context* ctx) {
 
 int main(int argc, char** argv) {
     if (argc < 2) {
-        std::fprintf(stderr, "usage: twonk <SLUS_208.87> [--log kernel,mem,cpu,hle,boot]\n");
+        std::fprintf(stderr, "usage: twonk <SLUS_208.87> [--log kernel,mem,cpu,hle,boot,iop|all]\n");
         return 2;
     }
     for (int i = 2; i + 1 < argc; ++i)
         if (!std::strcmp(argv[i], "--log")) {
             const std::string s = argv[i + 1];
-            static const char* const kNames[] = {"kernel", "mem", "cpu", "hle", "boot"};
-            for (int c = 0; c < 5; ++c)
-                if (s.find(kNames[c]) != std::string::npos || s == "all") ps2::g_log_mask |= 1u << c;
+            for (int c = 0; c < ps2::kLogCount; ++c)
+                if (s.find(ps2::kLogNames[c]) != std::string::npos || s == "all") ps2::g_log_mask |= 1u << c;
         }
 
     static ps2::Context ctx;   // large; keep off the stack
@@ -89,13 +91,42 @@ int main(int argc, char** argv) {
     ctx.ram = static_cast<uint8_t*>(std::calloc(ps2::kRamSize, 1));
     ctx.spr = static_cast<uint8_t*>(std::calloc(ps2::kSprSize, 1));
     ctx.vf[0].f[3] = 1.0f;   // vf0 = (0, 0, 0, 1)
-    ctx.cop0[12] = 0x70400004u;   // Status after BIOS: COP0/1/2 usable, kernel mode
+    ctx.cop0[12] = 0x70010001u;   // Status as ExecPS2 leaves it: COP0/1/2 usable, EIE and IE set (interrupts on)
 
     if (!load_elf_into_ram(argv[1], &ctx)) {
         std::fprintf(stderr, "error: cannot load %s\n", argv[1]);
         return 1;
     }
+    {
+        std::string root = argv[1];   // the disc root is the directory holding the ELF
+        const size_t slash = root.find_last_of("/\\");
+        root = slash == std::string::npos ? std::string(".") : root.substr(0, slash);
+        ps2::iop_init(root);
+    }
+    for (int i = 2; i + 1 < argc; ++i)
+        if (!std::strcmp(argv[i], "--iso")) {
+            std::string err;
+            if (!ps2::disc_open(argv[i + 1], &err)) {
+                std::fprintf(stderr, "error: %s\n", err.c_str());
+                return 1;
+            }
+            ps2::log(ps2::Log::Boot, "disc: %s", argv[i + 1]);
+    }
     ps2::kernel_init(&ctx);
+    // Hang watchdog: no syscall for 5 s means the guest is spinning on memory.
+    std::thread([] {
+        uint64_t last = ~0ull;
+        for (;;) {
+            std::this_thread::sleep_for(std::chrono::seconds(5));
+            const uint64_t n = ps2::kernel_syscall_count();
+            if (n == last) {
+                std::fprintf(stderr, "[ps2] watchdog: no syscall for 5 s, guest appears stuck\n");
+                ps2::dump_trace();
+                std::_Exit(3);
+            }
+            last = n;
+        }
+    }).detach();
     ps2::log(ps2::Log::Boot, "entering guest entry point 00100008");
     f_00100008(&ctx);
     ps2::log(ps2::Log::Boot, "guest entry returned (v0=%08x)", ctx.r[2].u32[0]);

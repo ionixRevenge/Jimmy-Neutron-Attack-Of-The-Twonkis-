@@ -277,6 +277,8 @@ void CodeGen::emit_control(const Function& fn, uint32_t pc, std::string& o, GenS
         const uint32_t t = in.branch_target();
         const bool link = r5900::is_call(in.op);
         std::string taken = link ? call(t) : target_code(fn, t, st);
+        // Loop back-edges are interrupt delivery points (see PS2_POLL_TICK).
+        if (!link && t <= pc && t >= fn.start) taken = "{ PS2_POLL_TICK(); " + taken + " }";
         std::string link_s = link ? f("S64(31) = (int32_t)0x%08xu; ", pc + 8) : "";
         if (cond == "true") {
             o += "    { " + link_s + "\n" + delay + "    " + taken + " }\n";
@@ -289,8 +291,11 @@ void CodeGen::emit_control(const Function& fn, uint32_t pc, std::string& o, GenS
     }
 
     switch (in.op) {
-    case Op::J:
-        o += "    {\n" + delay + "    " + target_code(fn, in.jump_target(), st) + " }\n";
+    case Op::J: {
+        const uint32_t t = in.jump_target();
+        const std::string poll = (t <= pc && t >= fn.start) ? "PS2_POLL_TICK(); " : "";
+        o += "    {\n" + delay + "    " + poll + target_code(fn, t, st) + " }\n";
+    }
         break;
     case Op::JAL:
         o += f("    S64(31) = (int32_t)0x%08xu;\n", pc + 8) + delay + "    " + call(in.jump_target()) + "\n";
@@ -351,7 +356,10 @@ void CodeGen::emit_function(const Function& fn, std::string& o, GenStats& st) co
     for (uint32_t pc = fn.start; pc < fn.end; pc += 4) {
         if (labels.count(pc)) o += f("L_%08x:;\n", pc);
         const Insn in = r5900::decode(pc, img_.read32(pc));
-        if (r5900::has_delay_slot(in.op) && pc + 4 < fn.end) {
+        // A final jr/j whose delay slot is the next function's first instruction
+        // (empty "jr ra" stubs) still executes that delay slot from the image.
+        const bool tail_jump = pc + 4 == fn.end && (in.op == Op::JR || in.op == Op::J) && img_.contains(pc + 4);
+        if (r5900::has_delay_slot(in.op) && (pc + 4 < fn.end || tail_jump)) {
             emit_control(fn, pc, o, st);
             if (labels.count(pc + 4)) o += f("    goto L_%08x;\n", pc + 8);
             else pc += 4;

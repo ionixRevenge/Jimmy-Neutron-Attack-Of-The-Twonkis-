@@ -109,6 +109,86 @@ static std::vector<uint32_t> data_code_pointers(const Image& img, const std::vec
     return out;
 }
 
+// A code address right after a "jr ra; <delay slot>" pair starts a function,
+// even without a stack-allocating prologue (leaf functions).
+static bool follows_return(const Image& img, uint32_t a) {
+    return img.contains(a - 8) && img.read32(a - 8) == 0x03E00008u;
+}
+
+// Weakest shape: right after any unconditional jump (j / jr) and its delay slot,
+// optionally followed by nop padding. Used only for soft entries.
+static bool follows_jump(const Image& img, uint32_t a) {
+    for (uint32_t pad = 0; pad <= 4; ++pad) {
+        if (pad && (!img.contains(a - 4 * pad) || img.read32(a - 4 * pad) != 0)) return false;
+        const uint32_t j = a - 4 * (pad + 2);
+        if (!img.contains(j)) return false;
+        const uint32_t w = img.read32(j);
+        if ((w & 0xFC1FFFFFu) == 0x00000008u || (w >> 26) == 2 || (w >> 16) == 0x1000) return true;   // jr, j, b
+    }
+    return false;
+}
+
+// Stricter: "jr ra; <delay slot>; nop..." with at least one alignment nop. The
+// compiler pads between functions, never before a jump-table case label.
+static bool follows_padded_return(const Image& img, uint32_t a, bool any_jr = false) {
+    for (uint32_t pad = 1; pad <= 4; ++pad) {   // jr ra at a - 4*(pad+2), delay slot, then `pad` nops
+        if (!img.contains(a - 4 * pad) || img.read32(a - 4 * pad) != 0) return false;
+        const uint32_t jr = a - 4 * (pad + 2);
+        if (!img.contains(jr)) return false;
+        const uint32_t w = img.read32(jr);
+        // jr ra; with any_jr also register tail calls. Never `j` (loop heads get
+        // padded too), and data pointers never use any_jr (switch dispatch is a
+        // `jr` followed by padded case labels).
+        if (w == 0x03E00008u || (any_jr && (w & 0xFC1FFFFFu) == 0x00000008u)) return true;
+    }
+    return false;
+}
+
+// Code addresses built in registers with lui + addiu/ori (callbacks registered
+// at run time, e.g. sifcmd handlers). Only addresses that begin a function
+// shape are kept, so data/jump-table addresses are never mistaken for entries.
+static std::vector<uint32_t> code_constructed_pointers(const Image& img, const std::vector<Region>& regions, bool loose = false) {
+    auto in_code = [&](uint32_t v) {
+        for (const auto& r : regions)
+            if (r.kind == "ee" && v >= r.start && v < r.end) return true;
+        return false;
+    };
+    std::vector<uint32_t> out;
+    for (const auto& r : regions) {
+        if (r.kind != "ee") continue;
+        for (uint32_t pc = r.start; pc < r.end; pc += 4) {
+            const auto hi = r5900::decode(pc, img.read32(pc));
+            if (hi.op != r5900::Op::LUI || hi.rt() == 0) continue;
+            // Scan forward from `from` for the low half that completes this lui.
+            auto scan = [&](uint32_t from) {
+                for (uint32_t k = 0; k < 24 && from + 4 * k < r.end; ++k) {
+                    const auto lo = r5900::decode(from + 4 * k, img.read32(from + 4 * k));
+                    if (lo.op == r5900::Op::JR) break;   // the pair never spans a return
+                    if ((lo.op == r5900::Op::ADDIU || lo.op == r5900::Op::ORI) && lo.rs() == hi.rt()) {
+                        const uint32_t v = (uint32_t)hi.imm() << 16;
+                        const uint32_t a = lo.op == r5900::Op::ORI ? (v | lo.imm()) : (uint32_t)(v + lo.simm());
+                        if ((a & 3) == 0 && in_code(a) && (loose ? follows_jump(img, a) : follows_return(img, a) || follows_padded_return(img, a, true) || ((img.read32(a) >> 16) == 0x27BD && (img.read32(a) & 0x8000)))) out.push_back(a);
+                        break;
+                    }
+                    // register overwritten (approximate: an rt field that is a destination)
+                    const bool writes_rt = lo.op != r5900::Op::SW && lo.op != r5900::Op::SD && lo.op != r5900::Op::SQ &&
+                                           lo.op != r5900::Op::J && lo.op != r5900::Op::JAL && !r5900::is_branch(lo.op);
+                    if (writes_rt && lo.rt() == hi.rt()) break;
+                }
+            };
+            scan(pc + 4);
+            // A lui in a branch delay slot also feeds the code at the branch target.
+            if (pc > r.start) {
+                const auto br = r5900::decode(pc - 4, img.read32(pc - 4));
+                if (r5900::is_branch(br.op) && !r5900::is_call(br.op)) scan(br.branch_target());
+            }
+        }
+    }
+    std::sort(out.begin(), out.end());
+    out.erase(std::unique(out.begin(), out.end()), out.end());
+    return out;
+}
+
 int main(int argc, char** argv) {
     if (argc < 3) return usage();
     const std::string cmd = argv[1];
@@ -157,7 +237,10 @@ int main(int argc, char** argv) {
         // (ctor tables, vtables, callbacks) are function entries.
         const auto ptrs = data_code_pointers(img, regions);
         for (uint32_t p : ptrs)
-            if ((img.read32(p) >> 16) == 0x27BD && (img.read32(p) & 0x8000)) forced.insert(p);
+            if (((img.read32(p) >> 16) == 0x27BD && (img.read32(p) & 0x8000)) || follows_padded_return(img, p)) forced.insert(p);
+        const auto cptrs = code_constructed_pointers(img, regions);
+        forced.insert(cptrs.begin(), cptrs.end());
+        std::fprintf(stderr, "code pointers: %zu in data, %zu built in registers\n", ptrs.size(), cptrs.size());
         // explicit function-pointer tables (e.g. .ctors): every non-null word is an entry
         for (const auto& r : regions)
             if (r.kind == "ptrs")
@@ -175,7 +258,14 @@ int main(int argc, char** argv) {
                 if (f.start > r.start && f.start < end) end = f.start;
             cands.push_back({r.start, end});
         }
-        auto funcs = refine_functions(img, cands, &rs, forced);
+        // Soft entries: code pointers (data or register-built) that follow a jump.
+        std::set<uint32_t> soft;
+        for (uint32_t p : ptrs)
+            if (!forced.count(p) && follows_jump(img, p)) soft.insert(p);
+        for (uint32_t p : code_constructed_pointers(img, regions, true))
+            if (!forced.count(p)) soft.insert(p);
+        auto funcs = refine_functions(img, cands, &rs, forced, soft);
+        std::fprintf(stderr, "soft entries: %zu kept, %zu merged away\n", rs.soft_kept, rs.soft_lost);
         std::fprintf(stderr, "functions: %zu candidates, %zu strong entries, %zu merges -> %zu functions, %zu residual cross-branches\n",
                      rs.input, rs.strong, rs.merges, rs.output, rs.residual_cross);
         CodeGen gen(img, funcs, data_code_pointers(img, regions), hle);

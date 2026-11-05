@@ -82,24 +82,55 @@ The run currently gets through these steps:
 - **Result:** 0 external branches and 0 residual cross-branches across 6,926
   functions.
 
-## Next: IOP / SIF
+## IOP / SIF (`iop*.cpp`, `disc.cpp`)
 
-Everything past this point goes through SIF RPC to the IOP: CD/DVD reads, pad,
-memory card, and the sound driver. The plan is to replace Sony's EE-side SIF
-library at the API level. The functions are near the `SceSifrpc*` strings at
-about `0x110000–0x112000`:
+The EE side runs Sony's sifcmd/sifrpc libraries unmodified. The IOP is emulated
+at the SIF syscall boundary (`SifSetDma`, `SifSetDChain`, `SifSetReg`/`GetReg`):
 
-- `sceSifInitRpc`
-- `sceSifBindRpc`
-- `sceSifCallRpc`
-- `sceSifLoadModule`
-- `sceCdInit`, `sceCdRead`
-- `scePadInit`, `scePadRead`
-- `sceMcOpen`
+- packets the EE sends to the IOP command buffer are decoded natively;
+- replies are queued and delivered as DMAC channel 5 interrupts.
 
-Each one is backed by a native service:
+On top of that sit native RPC servers:
 
-- the extracted disc files;
-- SDL input;
-- save files;
-- native audio.
+| Server | Service |
+|---|---|
+| `80000003` / `80000006` | IOP heap; module loading (modules are "loaded" by name, all native) |
+| `80000001` fileio 2.2 | Reports version `3000`, which the EE library checks. Files are served from the ISO; writes to fd 1/2 go to `[tty]` |
+| `80000592`–`8000059C` cdvdfsv | Init, S/N commands, sector reads, SearchFile, disc ready |
+| `10000000` HIS sound driver | Version `0x10802`. The driver's own disc reader (256 open, 257 read, 258 status = 5 done, 265 size). No audio yet |
+| `80000100`/`101` padman | XInput and keyboard, written to the pad DMA area each vblank |
+| `80000400` mcserv | Answers init; every card operation reports "no card" for now |
+
+`disc.cpp` reads ISO9660 straight from the user's image (`--iso`).
+
+### Hardware modelled for the boot
+
+- Timers 0–2 count in real time and raise INTC 9–11 on compare/overflow. The game's clock is timer 0 at bus/16 plus an overflow accumulator.
+- DMA completes instantly. PATH3 masking is modelled: a VIF1 `MSKPATH3` written to the FIFO sets GIF_STAT.M3P, a GIF transfer started while masked waits with FQC != 0, and the next VIF1 DMA releases it.
+
+## Boot progress (2026-11-04, continued)
+
+The game now does all of this:
+
+- resets the IOP and loads its modules;
+- initialises RenderWare and its GameMonkey scripts;
+- opens and reads CONFIG.TXT, BOOT.PAK, MENU.PAK and FMV.PAK (fileio and the HIS reader);
+- opens the pad and probes the memory card;
+- runs its frame loop, with one HIS 513 call per frame, without crashing for over 60 s.
+
+Nothing is drawn yet: GIF/VIF packets are consumed but not rendered.
+
+### Recompiler fixes found in this stretch
+
+Register-built pointers:
+- `lui`/`addiu` pairs up to 24 instructions apart are now matched;
+- the scan follows a branch when the `lui` sits in its delay slot;
+- a `jal`'s target bits no longer read as a register write.
+
+These found the hash callback `0x29dd10` and the RenderWare plugin callbacks `0x176270` and `0x247420`.
+
+## Next
+
+- Graphics: a GS/RenderWare bridge to draw the GIF/VIF1 output.
+- Sound: reverse the HIS driver protocol (functions 0, 512, 513, 514, ...).
+- Memory card: a virtual card in the user's save folder.

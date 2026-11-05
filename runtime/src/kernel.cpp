@@ -62,6 +62,7 @@ struct Kernel {
     std::vector<std::pair<int, Handler>> intc, dmac;   // registration order matters
     std::map<int, Alarm> alarms;
     uint32_t intc_mask = 0, dmac_mask = 0;
+    uint32_t dmac_pending = 0;
     int next_thread = 2, next_sema = 1, next_handler = 1, next_alarm = 1;
     int current = 1;
     bool in_interrupt = false;
@@ -94,7 +95,7 @@ const char* syscall_name(int n) {
     case 0x41: return "DeleteSema";     case 0x42: return "SignalSema";    case 0x44: return "WaitSema";
     case 0x45: return "PollSema";       case 0x47: return "ReferSemaStatus"; case 0x64: return "FlushCache";
     case 0x70: return "GsGetIMR";       case 0x71: return "GsPutIMR";      case 0x73: return "SetVSyncFlag";
-    case 0x74: return "SetSyscall";     case 0x76: return "SifDmaStat";    case 0x77: return "SifSetDma";
+    case 0x74: return "SetSyscall";     case 0x6B: return "SifStopDma";     case 0x55: return "PutTLBEntry"; case 0x56: return "SetTLBEntry"; case 0x57: return "GetTLBEntry"; case 0x58: return "ProbeTLBEntry"; case 0x59: return "ExpandScratchPad";     case 0x76: return "SifDmaStat";    case 0x77: return "SifSetDma";
     case 0x78: return "SifSetDChain";   case 0x79: return "SifSetReg";     case 0x7A: return "SifGetReg";
     case 0x7C: return "Deci2Call";      case 0x7F: return "GetMemorySize"; case 0x81: return "SetAlarm";
     case 0x4A: return "SetOsdConfigParam"; case 0x4B: return "GetOsdConfigParam";
@@ -134,12 +135,20 @@ bool deliver_interrupts(Context* ctx) {
     const uint64_t vs = (uint64_t)(secs * kVsyncHz);
     if (vs > K.vsyncs_delivered) {
         K.vsyncs_delivered = vs;   // drop missed frames rather than flooding
+        iop_vblank(ctx);
         for (uint32_t cause : {2u, 3u}) {   // INTC_VBLANK_S, INTC_VBLANK_E
             if (!(K.intc_mask & (1u << cause))) continue;
             for (auto& h : K.intc)
                 if (h.second.cause == cause) { run_handler(ctx, h.second.func, h.second.gp, cause, h.second.arg, 0); any = true; }
         }
     }
+    // EE timers 0-2 (INTC 9-11)
+    if (const uint32_t tc = timer_poll_irqs() & K.intc_mask)
+        for (uint32_t cause = 9; cause <= 11; ++cause) {
+            if (!(tc & (1u << cause))) continue;
+            for (auto& h : K.intc)
+                if (h.second.cause == cause) { run_handler(ctx, h.second.func, h.second.gp, cause, h.second.arg, 0); any = true; }
+        }
     const uint64_t hs = K.hsync_now();
     for (auto it = K.alarms.begin(); it != K.alarms.end();) {
         if (it->second.due_hsync <= hs) {
@@ -151,6 +160,24 @@ bool deliver_interrupts(Context* ctx) {
             ++it;
         }
     }
+    // DMA completion interrupts (handlers may start new transfers; bounded)
+    for (int round = 0; round < 64 && (K.dmac_pending & K.dmac_mask); ++round) {
+        const uint32_t p = K.dmac_pending & K.dmac_mask;
+        K.dmac_pending &= ~p;
+        for (int ch = 0; ch < 16; ++ch) {
+            if (!(p & (1u << ch))) continue;
+            for (auto& h : K.dmac)
+                if (h.second.cause == (uint32_t)ch) run_handler(ctx, h.second.func, h.second.gp, (uint32_t)ch, h.second.arg, 0);
+            any = true;
+        }
+    }
+    // SIF0 (IOP -> EE): one packet per DMAC channel 5 interrupt
+    if (K.dmac_mask & (1u << 5))
+        while (iop_pop_packet(ctx)) {
+            for (auto& h : K.dmac)
+                if (h.second.cause == 5) run_handler(ctx, h.second.func, h.second.gp, 5, h.second.arg, 0);
+            any = true;
+        }
     return any;
 }
 
@@ -239,12 +266,26 @@ void kernel_init(Context* ctx) {
 
 void kernel_poll(Context* ctx);
 
+static uint64_t g_syscalls = 0;
+uint64_t kernel_syscall_count() { return g_syscalls; }
+void kernel_raise_dmac(int ch) { if (ch != 5) K.dmac_pending |= 1u << ch; }
+
 void kernel_syscall(Context* ctx, uint32_t pc) {
+    ++g_syscalls;
     if (!K.in_interrupt) kernel_poll(ctx);
     const int n = ctx->r[3].s32[0];   // v1
-    const int call = n < 0 ? -n : n;
+    int call = n < 0 ? -n : n;
+    if (n < 0) {   // interrupt-context variants: most have their own number, one above the base call
+        switch (call) {
+        case 0x1A: case 0x1B: case 0x1C: case 0x1D: call -= 6; break;   // iEnable/DisableIntc/Dmac
+        case 0x26: case 0x2A: case 0x2C: case 0x2E: case 0x31: case 0x34:
+        case 0x36: case 0x38: case 0x3A: case 0x43: case 0x46: case 0x48: call -= 1; break;
+        case 0x68: call = 0x64; break;   // iFlushCache
+        default: break;                  // SIF and GS IMR variants share the number
+        }
+    }
     if (log_enabled(Log::Kernel))
-        log(Log::Kernel, "[t%d] %s(0x%02x) a0=%08x a1=%08x a2=%08x a3=%08x @%08x ra=%08x", K.current, syscall_name(n), call,
+        log(Log::Kernel, "[t%d] %s%s(0x%02x) a0=%08x a1=%08x a2=%08x a3=%08x @%08x ra=%08x", K.current, n < 0 ? "i" : "", syscall_name(call), call,
             A(ctx, 0), A(ctx, 1), A(ctx, 2), A(ctx, 3), pc, ctx->r[31].u32[0]);
 
     switch (call) {
@@ -279,6 +320,24 @@ void kernel_syscall(Context* ctx, uint32_t pc) {
     case 0x70: case 0x71: ret(ctx, 0); return;      // GsGetIMR / GsPutIMR
     case 0x74: ret(ctx, 0); return;                 // SetSyscall: kernel patches are not needed under HLE
     case 0x73: ret(ctx, 0); return;                 // SetVSyncFlag
+    case 0x55: case 0x56: {   // PutTLBEntry / SetTLBEntry(index, PageMask, EntryHi, EntryLo0, EntryLo1)
+        // The guest memory map is fixed in host_ptr; entries are only recorded for diagnostics.
+        const uint32_t lo0 = ctx->r[8].u32[0], lo1 = ctx->r[9].u32[0];
+        log(Log::Kernel, "  tlb[%u] mask=%08x hi=%08x lo0=%08x lo1=%08x", A(ctx, 0), A(ctx, 1), A(ctx, 2), A(ctx, 3), lo0 + 0 * lo1);
+        ret(ctx, (int32_t)A(ctx, 0));
+        return;
+    }
+    case 0x57: ret(ctx, (int32_t)A(ctx, 0)); return;   // GetTLBEntry
+    case 0x58: ret(ctx, -1); return;                    // ProbeTLBEntry: not found
+    case 0x59: ret(ctx, 0); return;                     // ExpandScratchPad
+    case 0x6B: ret(ctx, 0); return;                 // SifStopDma: transfers complete instantly
+    case 0x76: case 0x78: case 0x79: case 0x7A:
+        sif_syscall(ctx, call);
+        return;
+    case 0x77:   // SifSetDma: the IOP answers at once; deliver its reply before returning
+        sif_syscall(ctx, call);
+        if (!K.in_interrupt) kernel_poll(ctx);
+        return;
 
     // ---- interrupts --------------------------------------------------------------------
     case 0x10: case 0x12: {  // Add{Intc,Dmac}Handler(cause, handler, next, arg)
@@ -523,19 +582,32 @@ void kernel_syscall(Context* ctx, uint32_t pc) {
 
     case 0x04:
         log(Log::Kernel, "guest called Exit(%d)", (int)A(ctx, 0));
-        std::exit((int)A(ctx, 0));
+        if (A(ctx, 0) != 0) fatal(ctx, pc, "guest called Exit with an error code");
+        write_trace_file();
+        std::exit(0);
 
     default: {
         char msg[96];
-        std::snprintf(msg, sizeof msg, "unimplemented syscall %s (0x%02x%s)", syscall_name(n), call, n < 0 ? ", interrupt variant" : "");
+        std::snprintf(msg, sizeof msg, "unimplemented syscall %s (0x%02x%s)", syscall_name(call), call, n < 0 ? ", interrupt variant" : "");
         fatal(ctx, pc, msg);
     }
     }
 }
 
 // Called by the runtime at safe points (syscalls, idle loops) to keep time moving.
+uint32_t g_poll_tick = 0;
+
+// Interrupt delivery point inside guest code (function entries, MMIO polls).
+void poll_point(Context* ctx) {
+    g_poll_tick = 0;
+    if (K.in_interrupt || !(ctx->cop0[12] & 0x10000u)) return;   // handler running, or guest did DI
+    kernel_poll(ctx);
+}
+
 void kernel_poll(Context* ctx) {
+    // (the watchdog counts delivered interrupts as activity, like syscalls)
     if (deliver_interrupts(ctx)) {
+        ++g_syscalls;
         const int next = pick_next();
         if (next > 0 && K.threads[next].priority < cur().priority) reschedule(ctx);
     }

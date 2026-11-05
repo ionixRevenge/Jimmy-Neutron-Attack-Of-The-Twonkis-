@@ -13,6 +13,13 @@ add_library(ps2runtime STATIC
   runtime/src/kernel.cpp
   runtime/src/cop0.cpp
   runtime/src/hle_kernel.cpp
+  runtime/src/iop.cpp
+  runtime/src/iop_services.cpp
+  runtime/src/iop_cdvd.cpp
+  runtime/src/iop_his.cpp
+  runtime/src/iop_pad.cpp
+  runtime/src/iop_fileio.cpp
+  runtime/src/disc.cpp
   runtime/src/hw.cpp
   runtime/src/vu.cpp
 )

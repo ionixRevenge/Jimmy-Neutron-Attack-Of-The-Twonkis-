@@ -21,20 +21,47 @@ static RecompFn lookup(uint32_t addr) {
 }
 
 // Ring buffer of recent function entries (filled only when the game is built with PS2_TRACE=1).
-static uint32_t g_trace[64];
+constexpr unsigned kTraceSize = 1u << 16;
+static uint32_t g_trace[kTraceSize];
 static unsigned g_trace_pos;
-void trace_enter(Context*, uint32_t addr) { g_trace[g_trace_pos++ & 63] = addr; }
+void trace_enter(Context*, uint32_t addr) { g_trace[g_trace_pos++ & (kTraceSize - 1)] = addr; }
+
+// Whole ring to the file named by TWONK_TRACE_FILE (one address per line, oldest first).
+void write_trace_file() {
+    char path[512];
+    size_t n = 0;
+    if (getenv_s(&n, path, sizeof path, "TWONK_TRACE_FILE") || !n) return;
+    std::FILE* f = std::fopen(path, "w");
+    if (!f) return;
+    const unsigned pos = g_trace_pos, cnt = pos < kTraceSize ? pos : kTraceSize;
+    for (unsigned i = 0; i < cnt; ++i) std::fprintf(f, "%08x\n", g_trace[(pos - cnt + i) & (kTraceSize - 1)]);
+    std::fclose(f);
+    std::fprintf(stderr, "[ps2] wrote %u trace entries to %s\n", cnt, path);
+}
+
+// Snapshot of recent function entries; safe to call from another host thread (values may be torn).
+void dump_trace() {
+    const unsigned pos = g_trace_pos;
+    const unsigned n = pos < 64 ? pos : 64;
+    std::fprintf(stderr, "[ps2] last function entries (oldest first):");
+    for (unsigned i = 0; i < n; ++i)
+        std::fprintf(stderr, "%s%08x", (i % 8) ? " " : "\n   ", g_trace[(pos - n + i) & (kTraceSize - 1)]);
+    std::fprintf(stderr, "\n");
+    std::fflush(stderr);
+}
 
 void fatal(Context* ctx, uint32_t pc, const char* what) {
-    std::fprintf(stderr, "[ps2] fatal at %08x: %s (ra=%08x sp=%08x)\n", pc, what, ctx->r[31].u32[0], ctx->r[29].u32[0]);
+    if (ctx) std::fprintf(stderr, "[ps2] fatal at %08x: %s (ra=%08x sp=%08x)\n", pc, what, ctx->r[31].u32[0], ctx->r[29].u32[0]);
+    else std::fprintf(stderr, "[ps2] fatal at %08x: %s\n", pc, what);
     if (g_trace_pos) {
         std::fprintf(stderr, "[ps2] last function entries (oldest first):");
         const unsigned n = g_trace_pos < 64 ? g_trace_pos : 64;
         for (unsigned i = 0; i < n; ++i)
-            std::fprintf(stderr, "%s%08x", (i % 8) ? " " : "\n   ", g_trace[(g_trace_pos - n + i) & 63]);
+            std::fprintf(stderr, "%s%08x", (i % 8) ? " " : "\n   ", g_trace[(g_trace_pos - n + i) & (kTraceSize - 1)]);
         std::fprintf(stderr, "\n");
     }
     std::fflush(stderr);
+    write_trace_file();
     std::abort();
 }
 

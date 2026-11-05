@@ -10,7 +10,7 @@ namespace recomp {
 using r5900::Op;
 
 std::vector<Function> refine_functions(const Image& img, const std::vector<Function>& in, RefineStats* st,
-                                       const std::set<uint32_t>& forced) {
+                                       const std::set<uint32_t>& forced, const std::set<uint32_t>& soft) {
     *st = RefineStats{};
     st->input = in.size();
     if (in.empty()) return {};
@@ -27,8 +27,11 @@ std::vector<Function> refine_functions(const Image& img, const std::vector<Funct
             if (insn.op == Op::JAL || t < fn.start || t >= fn.end)   // calls always; jumps when they leave
                 if (t >= fns.front().start && t < fns.back().end) entries.insert(t);
         }
-    // split candidates at forced entries
-    for (uint32_t a : entries) {
+    // split candidates at forced and soft entries
+    std::set<uint32_t> splits(entries);
+    for (uint32_t a : soft)
+        if (a >= fns.front().start && a < fns.back().end) splits.insert(a);
+    for (uint32_t a : splits) {
         for (size_t i = 0; i < fns.size(); ++i) {
             if (a > fns[i].start && a < fns[i].end) {
                 Function tail{a, fns[i].end};
@@ -36,6 +39,19 @@ std::vector<Function> refine_functions(const Image& img, const std::vector<Funct
                 fns.insert(fns.begin() + i + 1, tail);
                 break;
             }
+        }
+    }
+
+    // A boundary can never fall in a delay slot: merge such a piece into its predecessor.
+    for (size_t i = 1; i < fns.size();) {
+        const uint32_t a = fns[i].start;
+        if (fns[i - 1].end == a && !entries.count(a) && r5900::has_delay_slot(r5900::decode(a - 4, img.read32(a - 4)).op)) {
+            fns[i - 1].end = fns[i].end;
+            fns.erase(fns.begin() + i);
+            entries.erase(a);
+            ++st->merges;
+        } else {
+            ++i;
         }
     }
 
@@ -98,6 +114,13 @@ std::vector<Function> refine_functions(const Image& img, const std::vector<Funct
             if (j >= 0 && fns[j].start == t) continue;
             ++st->residual_cross;
         }
+    for (uint32_t a : soft) {
+        if (strong.count(a)) continue;
+        const long j = find(a);
+        if (j < 0) continue;
+        if (fns[j].start == a) ++st->soft_kept;
+        else ++st->soft_lost;
+    }
     st->output = fns.size();
     return fns;
 }

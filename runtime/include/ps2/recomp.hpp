@@ -189,12 +189,20 @@ constexpr uint32_t kFcrC = 1u << 23;   // FPU condition bit in FCR31
 #define FPR(n) ctx->f[n]
 #define ADDR(base, off) ((uint32_t)(U32(base) + (int32_t)(off)))
 
-// Optional function-entry tracing (build the game library with PS2_TRACE=1).
-namespace ps2 { void trace_enter(Context* ctx, uint32_t addr); }
+// Function entry: optional tracing (build the game library with PS2_TRACE=1)
+// and a periodic interrupt delivery point. The EE takes interrupts between any
+// two instructions; delivering them every few thousand calls lets guest loops
+// that wait on an interrupt handler's flag make progress without a syscall.
+namespace ps2 {
+void trace_enter(Context* ctx, uint32_t addr);
+void poll_point(Context* ctx);
+extern uint32_t g_poll_tick;
+}
+#define PS2_POLL_TICK() do { if (++ps2::g_poll_tick >= 4096u) ps2::poll_point(ctx); } while (0)
 #if defined(PS2_TRACE) && PS2_TRACE
-#define PS2_FN_ENTER(addr) ps2::trace_enter(ctx, addr)
+#define PS2_FN_ENTER(addr) do { ps2::trace_enter(ctx, addr); PS2_POLL_TICK(); } while (0)
 #else
-#define PS2_FN_ENTER(addr) ((void)0)
+#define PS2_FN_ENTER(addr) PS2_POLL_TICK()
 #endif
 
 #include "ps2/exec_impl.hpp"
