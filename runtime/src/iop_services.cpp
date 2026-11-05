@@ -125,6 +125,7 @@ void register_services() {
     register_cdvd_services();
     register_his_service();
     register_pad_mc_services();
+    register_mc_service();
     register_fileio_service();
 }
 

@@ -13,6 +13,7 @@
 //   fno 263  service the read queue (the EE polls 258/263 until done)
 //   fno 265  file size(file id)
 //   fno 270  stream pause/resume around fileio access
+//   fno 513  voice status masks (polled every frame), see voice_status()
 //   fno 768  voice command { u16 voice, u16 cmd, u32 addr, u32 size, u32 start }:
 //            cmd 0x13 starts streaming SPU2 ADPCM from an IOP ring buffer, cmd 2 stops
 //   fno 769  { u16 voice } -> current play address in that ring (the EE refills behind it)
@@ -127,9 +128,29 @@ uint32_t voice_position(Call& c) {
     return v.addr + (uint32_t)((v.start + played) % v.size);
 }
 
+// fno 513: three 48-bit voice masks { playing, keyed on, ended (SPU2 ENDX) }, two words
+// each. The game drops a sound only once its voice reports ENDX, and after stopping all
+// sounds it waits for that (e.g. leaving the save screen), so without an SPU2 every
+// one-shot voice is reported as started and already finished. Virtual stream voices play.
+void voice_status(Call& c) {
+    uint64_t playing = 0;
+    for (int v = 0; v < 48; ++v)
+        if (g_voice[v].active) playing |= 1ull << v;
+    constexpr uint64_t kAll = (1ull << 48) - 1;
+    const uint64_t masks[3] = {playing, kAll, kAll & ~playing};
+    for (int i = 0; i < 3; ++i) {
+        wr32(c.buff + 8 * i, (uint32_t)masks[i]);
+        wr32(c.buff + 8 * i + 4, (uint32_t)(masks[i] >> 32));
+    }
+}
+
 uint32_t his_rpc(Call& c) {
     uint32_t result = 0;
     switch (c.fno) {
+    case 513:
+        std::memset(ram(c.buff, std::max(c.rsize, 24u)), 0, std::max(c.rsize, 24u));
+        voice_status(c);
+        return c.buff;
     case 1: result = 0x00010802; break;   // version
     case 256: result = open_file(c); break;
     case 257: result = disc_read(c); break;

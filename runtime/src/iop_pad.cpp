@@ -1,4 +1,4 @@
-// padman (old libpad: RPC servers 80000100 / 80000101) and mcserv (80000400).
+// padman (old libpad: RPC servers 80000100 / 80000101). mcserv is in iop_mc.cpp.
 //
 // padman: scePadPortOpen hands the IOP an EE buffer holding two pad frames.
 // The real driver refreshes it over SIF DMA every vblank; here iop_vblank()
@@ -6,7 +6,6 @@
 // std, 128-byte std, 128-byte "EX") are detected from the 0xFF markers libpad
 // leaves in the buffer, as documented by the Play! emulator.
 //
-// mcserv: no memory card inserted yet (saves come with the virtual card).
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
@@ -112,7 +111,7 @@ uint64_t g_frame = 0;
 uint16_t script_buttons() {
     uint16_t b = 0;
     for (const auto& s : g_script)
-        if (g_frame >= s.frame && g_frame < s.frame + 6) b |= s.bit;
+        if (g_frame >= s.frame && g_frame < s.frame + 15) b |= s.bit;
     return b;
 }
 
@@ -183,21 +182,6 @@ uint32_t pad_rpc(Call& c) {
     return c.buff;
 }
 
-uint32_t mc_rpc(Call& c) {
-    uint32_t* r = reinterpret_cast<uint32_t*>(ram(c.buff, std::max(c.rsize, 12u)));
-    const uint32_t fno = c.fno & 0xFF;
-    if (fno == 0xFE || fno == 0x70) {   // Init: result, mcserv and mcman versions
-        r[0] = 0;
-        r[1] = 0x20A;
-        r[2] = 0x20E;
-    } else {
-        std::memset(r, 0, c.rsize);
-        r[0] = (uint32_t)-10;   // sceMcResNoEntry-class result: no card in the slot
-        log(Log::Iop, "memory card function %02x: no card", fno);
-    }
-    return c.buff;
-}
-
 } // namespace
 
 void register_pad_mc_services() {
@@ -205,7 +189,6 @@ void register_pad_mc_services() {
     g_pad_logged.clear();
     register_server(0x80000100, "padman", 0x100, pad_rpc);
     register_server(0x80000101, "padman ext", 0x100, pad_rpc);
-    register_server(0x80000400, "mcserv", 0x500, mc_rpc);
 }
 
 } // namespace ps2::iop

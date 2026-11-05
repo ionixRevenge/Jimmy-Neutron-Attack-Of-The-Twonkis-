@@ -31,7 +31,8 @@ void register_server(uint32_t sid, const char* name, uint32_t buff_size, RpcFn f
 void register_services();        // iop_services.cpp
 void register_cdvd_services();   // iop_cdvd.cpp
 void register_his_service();     // iop_his.cpp
-void register_pad_mc_services(); // iop_pad.cpp
+void register_pad_mc_services(); // iop_pad.cpp (pad only)
+void register_mc_service();      // iop_mc.cpp
 void register_fileio_service();  // iop_fileio.cpp
 
 // Queue a sifcmd packet for the EE: 16-byte header (cid filled in) + payload.

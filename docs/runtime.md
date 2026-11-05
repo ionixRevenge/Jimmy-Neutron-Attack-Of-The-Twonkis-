@@ -163,10 +163,45 @@ Two problems surfaced in the movie player, and both were timing or end-of-stream
 
 The title screen and the attract-mode gameplay demo now render correctly.
 
+## Memory card (`iop_mc.cpp`)
+
+The game uses the old libmc (the v1 RPC numbering) on mcserv `0x80000400`.
+Slot 1 is a host directory, `--memcard <dir>`, defaulting to `memcard/`; it
+holds `slot1/`. Port 1 reports no card. Functions supported:
+
+| fno | Function | fno | Function |
+|---|---|---|---|
+| 01 | GetInfo | 0C | ChDir |
+| 02 | Open | 0D | GetDir |
+| 03 | Close | 0E | SetInfo |
+| 04 | Seek | 0F | Delete |
+| 05 | Read | 10/11 | Format/Unformat |
+| 06 | Write | 12 | GetEntSpace |
+| 0A | Flush | FE/70 | Init |
+
+GetInfo writes a 0xC0-byte parameter block: type at 0, free clusters at 4,
+format at 0x90. The first GetInfo for a port returns -1 (a new card), as real
+hardware does.
+
+The card's free space is computed from the files in the folder: 1-KB clusters per
+file, plus one cluster per two directory entries. The game sizes its `pad.dat`
+reservation file from the change in free space across a save, so a constant value
+makes the save fail. GetInfo carries the port in word 1; word 0 holds stale data.
+
+New Game now saves (`BASLUS-20887Save/` holds `icon.sys`, `static.ico`,
+`JN04-0.dat` and `pad.dat`) and goes on to load the first level.
+
+## Sound status (HIS fno 513)
+
+Every frame the game polls fno 513 for three 48-voice masks: playing, keyed on and
+ended (the SPU2's ENDX). A sound is removed from its list only after its voice
+reports ENDX. Leaving the save screen stops all sounds and waits for that list to
+empty. Until the SPU2 is emulated, one-shot voices are reported as started and
+already finished, and virtual stream voices as playing.
+
 ## Next
 
 - Movies drop to about 19 pictures/s in clips with audio. Profile this.
 
 - Graphics: a GS/RenderWare bridge to draw the GIF/VIF1 output.
 - Sound: reverse the HIS driver protocol (functions 0, 512, 513, 514, ...).
-- Memory card: a virtual card in the user's save folder.

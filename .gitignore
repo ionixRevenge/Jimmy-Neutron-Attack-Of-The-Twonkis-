@@ -13,3 +13,6 @@ analysis/
 # build output
 recomp/build/
 build/
+
+# player saves (virtual memory card)
+memcard/

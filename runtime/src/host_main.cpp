@@ -99,6 +99,7 @@ int main(int argc, char** argv) {
                 ps2::profiler_start(colon ? std::atof(spec) : 0.0, std::atof(colon ? colon + 1 : spec));
             }
             if (!std::strcmp(argv[i], "--input") && i + 1 < argc) ps2::pad_script(argv[i + 1]);
+            if (!std::strcmp(argv[i], "--memcard") && i + 1 < argc) ps2::memcard_config(argv[i + 1]);
             if (!std::strcmp(argv[i], "--shot") && i + 1 < argc) {
                 shot_path = argv[i + 1];
                 const size_t colon = shot_path.rfind(':');

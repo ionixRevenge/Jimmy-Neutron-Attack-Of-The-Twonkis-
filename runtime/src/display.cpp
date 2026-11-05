@@ -160,6 +160,7 @@ void display_present(const uint32_t* px, uint32_t w, uint32_t h, uint64_t frame)
         std::string path = g_shot_path;
         if (const size_t hash = path.find('#'); hash != std::string::npos) path.replace(hash, 1, std::to_string(frame));
         if (write_png(path, px, w, h)) std::fprintf(stderr, "[gpu] wrote %ux%u screenshot (frame %llu) to %s\n", w, h, (unsigned long long)frame, path.c_str());
+        write_trace_file();   // with $TWONK_TRACE_FILE: what the game was doing at this frame (for hangs)
     }
     if (!g_window) return;
     if (!g_started.exchange(true)) std::thread(window_thread).detach();

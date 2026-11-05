@@ -46,33 +46,45 @@ inline void exec(Context* ctx, uint32_t pc, uint32_t raw) {
 //   0x00000000-0x01FFFFFF RAM, mirrored at 0x20000000 (uncached) and 0x30000000 (UCAB)
 //   0x70000000-0x70003FFF scratchpad
 //   0x10000000-0x1FFFFFFF hardware registers / BIOS -> mmio
-inline uint8_t* host_ptr(Context* ctx, uint32_t a) {
+#if defined(_MSC_VER)
+#define PS2_FORCEINLINE __forceinline
+#else
+#define PS2_FORCEINLINE inline __attribute__((always_inline))
+#endif
+
+// Generated functions can be huge, and MSVC stops inlining inside them, so the
+// memory fast path is forced inline. Plain kuseg RAM is checked first.
+inline uint8_t* host_ptr_other(Context* ctx, uint32_t a) {
     const uint32_t seg = a >> 28;
-    if ((seg == 0x0 || seg == 0x2 || seg == 0x3) && (a & 0x0FFFFFFF) < kRamSize) return ctx->ram + (a & (kRamSize - 1));
+    if ((seg == 0x2 || seg == 0x3) && (a & 0x0FFFFFFF) < kRamSize) return ctx->ram + (a & (kRamSize - 1));
     if (seg == 0x7 && (a & 0x0FFFFFFF) < kSprSize) return ctx->spr + (a & (kSprSize - 1));
     if (seg == 0x8 || seg == 0xA) {  // kseg0/kseg1 mirrors of RAM
         if ((a & 0x1FFFFFFF) < kRamSize) return ctx->ram + (a & (kRamSize - 1));
     }
     return nullptr;
 }
+PS2_FORCEINLINE uint8_t* host_ptr(Context* ctx, uint32_t a) {
+    if (a < kRamSize) return ctx->ram + a;
+    return host_ptr_other(ctx, a);
+}
 
 template <typename T>
-inline T mem_read(Context* ctx, uint32_t a) {
+PS2_FORCEINLINE T mem_read(Context* ctx, uint32_t a) {
     if (uint8_t* p = host_ptr(ctx, a)) { T v; std::memcpy(&v, p, sizeof v); return v; }
     return (T)mmio_read(ctx, a, (int)sizeof(T));
 }
 template <typename T>
-inline void mem_write(Context* ctx, uint32_t a, T v) {
+PS2_FORCEINLINE void mem_write(Context* ctx, uint32_t a, T v) {
     if (uint8_t* p = host_ptr(ctx, a)) { std::memcpy(p, &v, sizeof v); return; }
     mmio_write(ctx, a, (uint64_t)v, (int)sizeof(T));
 }
-inline void mem_read128(Context* ctx, uint32_t a, u128* out) {
+PS2_FORCEINLINE void mem_read128(Context* ctx, uint32_t a, u128* out) {
     a &= ~15u;
     if (uint8_t* p = host_ptr(ctx, a)) { std::memcpy(out, p, 16); return; }
     out->u64[0] = mem_read<uint64_t>(ctx, a);
     out->u64[1] = mem_read<uint64_t>(ctx, a + 8);
 }
-inline void mem_write128(Context* ctx, uint32_t a, const u128& v) {
+PS2_FORCEINLINE void mem_write128(Context* ctx, uint32_t a, const u128& v) {
     a &= ~15u;
     if (uint8_t* p = host_ptr(ctx, a)) { std::memcpy(p, &v, 16); return; }
     mem_write<uint64_t>(ctx, a, v.u64[0]);
