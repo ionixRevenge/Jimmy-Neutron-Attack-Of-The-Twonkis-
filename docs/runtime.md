@@ -154,9 +154,17 @@ Two problems surfaced in the movie player, and both were timing or end-of-stream
   that needs 32 more bits. Its wait loop then kicks empty toIPU transfers until
   the command finishes. A starved IPU given an empty transfer reads zeros.
 
+- **PATH3 pacing.** RenderWare uploads textures through PATH3. Before each
+  texture's draws, it opens a brief MSKPATH3 off/on window in the VIF1 stream,
+  and the hardware lets one GIF packet (up to EOP) through per window. VIF1 runs
+  synchronously here, so while it is busy PATH3 pauses at every EOP. Without this
+  pause, all of a frame's uploads land before its draws, and textures that share
+  VRAM overwrite each other.
+
+The title screen and the attract-mode gameplay demo now render correctly.
+
 ## Next
 
-- Rendering bugs on the title screen (overlapping logo layers) and in attract-mode gameplay (texture corruption).
 - Movies drop to about 19 pictures/s in clips with audio. Profile this.
 
 - Graphics: a GS/RenderWare bridge to draw the GIF/VIF1 output.

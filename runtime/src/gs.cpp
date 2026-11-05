@@ -64,9 +64,12 @@ enum Reg : uint32_t {
 };
 
 // ---- CLUT -------------------------------------------------------------------------
-uint32_t g_clut[256];   // entries as stored (CT32, or CT16 in the low half)
+uint32_t g_clut[512];   // CLUT buffer entries as stored: 256 CT32 or 512 CT16 slots
 uint32_t g_clut_psm = PSMCT32;
 uint32_t g_cbp0 = ~0u, g_cbp1 = ~0u;
+
+// First CLUT slot of TEX0.CSA: CT32 entries fill two halves of the buffer, so only 16 offsets.
+uint32_t clut_offset(uint32_t cpsm, uint32_t csa) { return cpsm == 0 ? (csa & 15) * 16 : csa * 16; }
 
 void load_clut(uint64_t tex0) {
     const uint32_t psm = bf(tex0, 20, 6), cbp = bf(tex0, 37, 14), cpsm = bf(tex0, 51, 4);
@@ -100,9 +103,7 @@ void load_clut(uint64_t tex0) {
         } else {       // 8x2
             x = i & 7; y = i >> 3;
         }
-        const uint32_t slot = eight ? i : (cpsm_mem == PSMCT32 ? (csa & 15) * 16 + i : csa * 16 + i) & 255;
-        if (eight) g_clut[i] = read_pixel(cpsm_mem, cbp, 1, x, y);
-        else g_clut[slot] = read_pixel(cpsm_mem, cbp, 1, x, y);
+        g_clut[(clut_offset(cpsm, csa) + i) & 511] = read_pixel(cpsm_mem, cbp, 1, x, y);
     }
 }
 
@@ -192,7 +193,7 @@ Rgba from16(uint32_t v, uint64_t texa, bool tex) {
 Rgba from32(uint32_t v) { return Rgba{(int)(v & 0xFF), (int)((v >> 8) & 0xFF), (int)((v >> 16) & 0xFF), (int)(v >> 24)}; }
 
 struct Texture {
-    uint32_t psm, bp, bw, tw, th, tcc, tfx;
+    uint32_t psm, bp, bw, tw, th, tcc, tfx, clut_off;
     uint32_t wms, wmt, minu, maxu, minv, maxv;
     bool bilinear;
     uint64_t texa;
@@ -221,7 +222,7 @@ Rgba texel(const Texture& t, int u, int v) {
     }
     case PSMCT16: case PSMCT16S: return from16(raw, t.texa, true);
     default: {   // indexed
-        const uint32_t e = g_clut[raw & 255];
+        const uint32_t e = g_clut[(t.clut_off + (raw & 255)) & (g_clut_psm == PSMCT32 ? 255 : 511)];
         return g_clut_psm == PSMCT32 ? from32(e) : from16(e & 0xFFFF, t.texa, true);
     }
     }
@@ -265,6 +266,7 @@ void setup_draw() {
     D.tex.bp = bf(t0, 0, 14); D.tex.bw = bf(t0, 14, 6); D.tex.psm = bf(t0, 20, 6);
     D.tex.tw = 1u << std::min(bf(t0, 26, 4), 10u); D.tex.th = 1u << std::min(bf(t0, 30, 4), 10u);
     D.tex.tcc = bf(t0, 34, 1); D.tex.tfx = bf(t0, 35, 2);
+    D.tex.clut_off = bf(t0, 55, 1) ? 0 : clut_offset(bf(t0, 51, 4), bf(t0, 56, 5));
     D.tex.wms = bf(cl, 0, 2); D.tex.wmt = bf(cl, 2, 2);
     D.tex.minu = bf(cl, 4, 10); D.tex.maxu = bf(cl, 14, 10); D.tex.minv = bf(cl, 24, 10); D.tex.maxv = bf(cl, 34, 10);
     D.tex.bilinear = bf(D.k.tex1, 5, 1);   // MMAG (LOD 0 assumed)

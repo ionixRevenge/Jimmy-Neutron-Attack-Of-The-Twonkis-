@@ -17,6 +17,8 @@
 
 namespace ps2 {
 
+void gif_path3_resume(Context* ctx);   // below: VIF1 lifted the PATH3 mask
+
 namespace {
 
 using Clock = std::chrono::steady_clock;
@@ -102,7 +104,16 @@ uint64_t g_dma_count[10];
 
 // PATH3 masking: a GIF transfer started while VIF1's MSKPATH3 is on waits (its
 // data sits in the GIF FIFO, FQC != 0) until VIF1 lifts the mask.
+//
+// VIF1 runs synchronously here, so PATH3 cannot really run beside it. RenderWare
+// opens a short MSKPATH3 off/on window before each texture's draws, and the
+// hardware lets one GIF packet (up to an EOP tag) through it. So, while a VIF1
+// transfer is in progress, PATH3 pauses after every EOP packet. Each MSKPATH3-off
+// edge releases the next packet, and the end of the VIF1 transfer releases the rest.
 bool g_gif_stalled = false;
+bool g_vif1_busy = false;
+bool g_p3_pause = false;          // PATH3 stopped at a packet boundary
+bool g_chain_end_pending[10];     // the paused tag was the chain's last
 
 void finish_dma(Context* ctx, int ch) {
     g_regs[kDmaBase[ch]] &= ~0x100u;        // STR: transfer finished
@@ -124,30 +135,44 @@ uint8_t* dma_mem(Context* ctx, uint32_t addr, bool spr, uint32_t qwc) {
     return ctx->ram + a;
 }
 
-// Sends `qwc` quadwords to channel 1 (VIF1) or 2 (GIF PATH3). Scratchpad sources wrap.
-void dma_send(Context* ctx, int ch, uint32_t addr, bool spr, uint32_t qwc) {
-    if (!qwc) return;
+// Sends `qwc` quadwords to channel 1 (VIF1) or 2 (GIF PATH3); returns how many were
+// sent (fewer when PATH3 pauses at a packet boundary). Scratchpad sources wrap.
+uint32_t dma_send(Context* ctx, int ch, uint32_t addr, bool spr, uint32_t qwc) {
+    if (!qwc) return 0;
     if (ch == 9) {   // toSPR: memory -> scratchpad at SADR
         uint32_t& sadr = g_regs[kDmaBase[9] + 0x80];
         for (uint32_t i = 0; i < qwc; ++i) {
             std::memcpy(ctx->spr + (sadr & (kSprSize - 1) & ~15u), dma_mem(ctx, addr + i * 16, spr, 1), 16);
             sadr += 16;
         }
-        return;
+        return qwc;
     }
-    if (spr || (addr & 0x80000000u)) {
+    const bool in_spr = spr || (addr & 0x80000000u);
+    auto qword = [&](uint32_t i) -> const uint8_t* {
+        return in_spr ? ctx->spr + ((addr + i * 16) & (kSprSize - 1) & ~15u) : dma_mem(ctx, addr + i * 16, false, 1);
+    };
+    if (ch == 2 && g_vif1_busy) {   // stop at the first packet boundary
         for (uint32_t i = 0; i < qwc; ++i) {
-            const uint8_t* q = ctx->spr + ((addr + i * 16) & (kSprSize - 1) & ~15u);
-            if (ch == 1) gpu::vif1_write(ctx, q, 1); else gpu::gif_write(gpu::Path::P3, q, 1);
+            gpu::gif_write(gpu::Path::P3, qword(i), 1);
+            if (gpu::gif_p3_packet_end()) { g_p3_pause = true; return i + 1; }
         }
-        return;
+        return qwc;
     }
-    const uint8_t* p = dma_mem(ctx, addr, false, qwc);
-    if (ch == 1) gpu::vif1_write(ctx, p, qwc); else gpu::gif_write(gpu::Path::P3, p, qwc);
+    if (in_spr) {
+        for (uint32_t i = 0; i < qwc; ++i) {
+            if (ch == 1) gpu::vif1_write(ctx, qword(i), 1); else gpu::gif_write(gpu::Path::P3, qword(i), 1);
+        }
+    } else {
+        const uint8_t* p = dma_mem(ctx, addr, false, qwc);
+        if (ch == 1) gpu::vif1_write(ctx, p, qwc); else gpu::gif_write(gpu::Path::P3, p, qwc);
+    }
+    if (ch == 2) gpu::gif_p3_packet_end();   // not pausing: drop the flag
+    return qwc;
 }
 
 // Source-chain DMA (EE manual, DMAC chapter): tags refe/cnt/next/ref/refs/call/ret/end.
-void run_chain(Context* ctx, int ch) {
+// Returns false when PATH3 paused mid-chain; MADR/QWC/TADR then say where to resume.
+bool run_chain(Context* ctx, int ch) {
     const uint32_t base = kDmaBase[ch];
     uint32_t& chcr = g_regs[base];
     uint32_t& madr = g_regs[base + 0x10];
@@ -156,41 +181,52 @@ void run_chain(Context* ctx, int ch) {
     const bool tte = (chcr >> 6) & 1;
     uint32_t stack[2] = {g_regs[base + 0x40], g_regs[base + 0x50]};
     uint32_t asp = (chcr >> 4) & 3;
+    bool done = false, paused = false;
+    // send `n` qwords at `from`; on a pause, MADR/QWC keep the rest of this tag
+    auto send = [&](uint32_t from, bool from_spr, uint32_t n, bool last) {
+        const uint32_t sent = dma_send(ctx, ch, from, from_spr, n);
+        madr = from + sent * 16;
+        qwc = n - sent;
+        if (g_p3_pause) { g_p3_pause = false; paused = true; g_chain_end_pending[ch] = last; }
+        else if (last) done = true;
+    };
     // QWC left over from a previous (suspended) transfer goes first
-    if (qwc) { dma_send(ctx, ch, madr, false, qwc); madr += qwc * 16; qwc = 0; }
-    for (int guard = 0; guard < 1 << 20; ++guard) {
+    if (qwc) send(madr, false, qwc, g_chain_end_pending[ch]);
+    else if (g_chain_end_pending[ch]) done = true;
+    g_chain_end_pending[ch] = false;
+    for (int guard = 0; !done && !paused && guard < 1 << 20; ++guard) {
         const uint8_t* t = dma_mem(ctx, tadr, false, 1);
         uint64_t tag;
         std::memcpy(&tag, t, 8);
         const uint32_t n = (uint32_t)(tag & 0xFFFF), id = (uint32_t)((tag >> 28) & 7);
         const uint32_t addr = (uint32_t)((tag >> 32) & 0x7FFFFFF0u);
         const bool spr = (tag >> 63) & 1, irq = (tag >> 31) & 1;
+        const bool stop_irq = irq && (chcr & 0x80);   // TIE: stop at an IRQ tag
         chcr = (chcr & 0xFFFF) | (uint32_t)(tag & 0xFFFF0000u);   // TAG field mirrors the tag's upper half
         if (tte && ch == 1) gpu::vif1_fifo_words(ctx, reinterpret_cast<const uint32_t*>(t + 8), 2);
-        bool end = false;
+        const uint32_t data = tadr + 16;
         switch (id) {
-        case 0:  dma_send(ctx, ch, addr, spr, n); tadr += 16; end = true; break;              // refe
-        case 1:  dma_send(ctx, ch, tadr + 16, false, n); tadr += 16 + n * 16; break;          // cnt
-        case 2:  dma_send(ctx, ch, tadr + 16, false, n); tadr = addr; break;                  // next
-        case 3: case 4: dma_send(ctx, ch, addr, spr, n); tadr += 16; break;                   // ref / refs
-        case 5:                                                                               // call
-            dma_send(ctx, ch, tadr + 16, false, n);
+        case 0:  tadr += 16; send(addr, spr, n, true); break;                       // refe
+        case 1:  tadr += 16 + n * 16; send(data, false, n, stop_irq); break;        // cnt
+        case 2:  tadr = addr; send(data, false, n, stop_irq); break;                // next
+        case 3: case 4: tadr += 16; send(addr, spr, n, stop_irq); break;            // ref / refs
+        case 5:                                                                     // call
             if (asp >= 2) fatal(ctx, tadr, "DMA call stack overflow");
-            stack[asp++] = tadr + 16 + n * 16;
+            stack[asp++] = data + n * 16;
             tadr = addr;
+            send(data, false, n, stop_irq);
             break;
-        case 6:                                                                               // ret
-            dma_send(ctx, ch, tadr + 16, false, n);
-            if (asp) tadr = stack[--asp];
-            else { tadr += 16 + n * 16; end = true; }
+        case 6:                                                                     // ret
+            if (asp) { tadr = stack[--asp]; send(data, false, n, stop_irq); }
+            else { tadr += 16 + n * 16; send(data, false, n, true); }
             break;
-        default: dma_send(ctx, ch, tadr + 16, false, n); tadr += 16 + n * 16; end = true; break;  // end
+        default: tadr += 16 + n * 16; send(data, false, n, true); break;            // end
         }
-        if (end || (irq && (chcr & 0x80))) break;   // TIE: stop at an IRQ tag
     }
     chcr = (chcr & ~0x30u) | (asp << 4);
     g_regs[base + 0x40] = stack[0];
     g_regs[base + 0x50] = stack[1];
+    return !paused;
 }
 
 void run_dma(Context* ctx, int ch) {
@@ -221,8 +257,20 @@ void run_dma(Context* ctx, int ch) {
         fatal(ctx, base, "SPR DMA in this mode is not implemented");
     } else if (ch == 1 || ch == 2) {
         if (ch == 1 && !(chcr & 1)) fatal(ctx, base, "VIF1 DMA towards memory is not implemented");
-        if (mode == 1) run_chain(ctx, ch);
-        else { dma_send(ctx, ch, madr, false, qwc); madr += qwc * 16; qwc = 0; }
+        const bool outer = ch == 1 && !g_vif1_busy;
+        if (outer) g_vif1_busy = true;
+        bool finished = true;
+        if (mode == 1) finished = run_chain(ctx, ch);
+        else {
+            const uint32_t sent = dma_send(ctx, ch, madr, false, qwc);
+            madr += sent * 16; qwc -= sent;
+            if (g_p3_pause) { g_p3_pause = false; finished = false; }
+        }
+        if (outer) {
+            g_vif1_busy = false;
+            if (g_gif_stalled && !gpu::vif1_mskpath3()) gif_path3_resume(ctx);   // VIF1 done: PATH3 drains
+        }
+        if (!finished) { g_gif_stalled = true; return; }   // PATH3 waits for the next window
     } else if (ch == 3 || ch == 4) {
         ipu::dma_start(ctx, ch);   // the IPU completes the transfer as data moves
         return;

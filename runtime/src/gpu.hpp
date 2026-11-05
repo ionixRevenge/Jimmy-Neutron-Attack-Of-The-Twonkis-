@@ -31,6 +31,7 @@ bool vif1_mskpath3();   // PATH3 masked by MSKPATH3
 // ---- GIF -----------------------------------------------------------------------
 enum class Path { P1 = 1, P2 = 2, P3 = 3 };
 void gif_write(Path p, const uint8_t* data, uint32_t qwc);
+bool gif_p3_packet_end();   // PATH3 completed an EOP packet since the last call (clears)
 
 // ---- GS ------------------------------------------------------------------------
 void gs_write_reg(uint32_t reg, uint64_t value);          // GIF A+D / PACKED / REGLIST

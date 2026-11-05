@@ -19,6 +19,7 @@ struct PathState {
     bool reglist_half = false;
 };
 PathState g_path[4];
+bool g_p3_packet_end = false;   // PATH3 just finished an EOP packet
 float g_q = 1.0f;        // Q from the last PACKED ST, used by PACKED RGBAQ
 
 uint64_t bits(const uint64_t* q, int lo, int n) {   // n <= 32, within one 64-bit half
@@ -83,6 +84,7 @@ void gif_write(Path p, const uint8_t* data, uint32_t qwc) {
         const uint64_t* q = reinterpret_cast<const uint64_t*>(data + i * 16);
         if (s.nloop == 0) {
             start_tag(p, s, q);
+            if (p == Path::P3 && s.nloop == 0 && s.eop) g_p3_packet_end = true;
             continue;
         }
         switch (s.fmt) {
@@ -102,7 +104,14 @@ void gif_write(Path p, const uint8_t* data, uint32_t qwc) {
             --s.nloop;
             break;
         }
+        if (p == Path::P3 && s.nloop == 0 && s.eop) g_p3_packet_end = true;
     }
+}
+
+bool gif_p3_packet_end() {
+    const bool e = g_p3_packet_end;
+    g_p3_packet_end = false;
+    return e;
 }
 
 } // namespace ps2::gpu
