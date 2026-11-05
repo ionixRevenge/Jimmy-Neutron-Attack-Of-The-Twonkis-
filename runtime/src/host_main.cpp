@@ -19,8 +19,8 @@ void f_00100008(ps2::Context* ctx);   // ELF entry point (generated)
 namespace ps2 {
 
 static unsigned g_log_mask = 1u << (int)Log::Boot;
-static const char* const kLogNames[] = {"kernel", "mem", "cpu", "hle", "boot", "iop"};
-constexpr int kLogCount = 6;
+static const char* const kLogNames[] = {"kernel", "mem", "cpu", "hle", "boot", "iop", "gpu"};
+constexpr int kLogCount = 7;
 
 bool log_enabled(Log ch) { return (g_log_mask >> (int)ch) & 1u; }
 
@@ -85,6 +85,32 @@ int main(int argc, char** argv) {
             for (int c = 0; c < ps2::kLogCount; ++c)
                 if (s.find(ps2::kLogNames[c]) != std::string::npos || s == "all") ps2::g_log_mask |= 1u << c;
         }
+
+    {   // --no-window, --shot <file.png>:<frame>[,<frame>...]  ('#' in the name becomes the frame number)
+        bool window = true;
+        const char* shot = nullptr;
+        const char* shot_frames = nullptr;
+        static std::string shot_path;
+        for (int i = 2; i < argc; ++i) {
+            if (!std::strcmp(argv[i], "--no-window")) window = false;
+            if (!std::strcmp(argv[i], "--profile") && i + 1 < argc) {   // --profile [<delay>:]<seconds>
+                const char* spec = argv[i + 1];
+                const char* colon = std::strchr(spec, ':');
+                ps2::profiler_start(colon ? std::atof(spec) : 0.0, std::atof(colon ? colon + 1 : spec));
+            }
+            if (!std::strcmp(argv[i], "--input") && i + 1 < argc) ps2::pad_script(argv[i + 1]);
+            if (!std::strcmp(argv[i], "--shot") && i + 1 < argc) {
+                shot_path = argv[i + 1];
+                const size_t colon = shot_path.rfind(':');
+                if (colon != std::string::npos && colon > 1) {
+                    shot_path[colon] = 0;
+                    shot_frames = shot_path.c_str() + colon + 1;
+                }
+                shot = shot_path.c_str();
+            }
+        }
+        ps2::display_config(window, shot, shot_frames);
+    }
 
     static ps2::Context ctx;   // large; keep off the stack
     std::memset(&ctx, 0, sizeof ctx);

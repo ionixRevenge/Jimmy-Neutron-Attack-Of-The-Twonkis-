@@ -29,7 +29,7 @@ void syscall(Context* ctx, uint32_t pc);
 void breakpoint(Context* ctx, uint32_t pc);
 bool cop0_condition(Context* ctx);                       // BC0F/BC0T (CPCOND0: DMA idle)
 bool vu0_busy(Context* ctx);                             // BC2F/BC2T
-uint32_t mmio_read(Context* ctx, uint32_t addr, int size);
+uint64_t mmio_read(Context* ctx, uint32_t addr, int size);
 void mmio_write(Context* ctx, uint32_t addr, uint64_t value, int size);
 [[noreturn]] void unimplemented(Context* ctx, uint32_t pc, uint32_t raw, const char* name);
 

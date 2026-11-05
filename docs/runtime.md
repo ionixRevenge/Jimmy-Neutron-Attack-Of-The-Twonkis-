@@ -129,7 +129,35 @@ Register-built pointers:
 
 These found the hash callback `0x29dd10` and the RenderWare plugin callbacks `0x176270` and `0x247420`.
 
+## Graphics, movies and intro (2026-11-04)
+
+| File | What it does |
+|---|---|
+| `vif.cpp`, `vu1.cpp` | VIF1 unpack/MPG/MSCAL and a VU1 interpreter for RenderWare's microcode |
+| `gif.cpp` | GIF PATH1/2/3 tag parsing into GS register writes |
+| `gs.cpp`, `gs_mem.hpp` | A software GS: swizzled local memory (table-driven address swizzle), CLUTs, sprites, triangles and lines. Primitives are queued and rasterised on a thread pool, where each thread owns interleaved 8-row bands |
+| `display.cpp` | Presents the GS display circuit in a window; `--shot path#.png:f1,f2` saves frames |
+| `ipu.cpp` | The IPU: MPEG-2 VLC/IDCT/dequantisation, BDEC/IDEC/VDEC/FDEC/CSC, with DMA channels 3/4 pulled lazily. Commands run on a fiber that yields when the input FIFO starves |
+| `profiler.cpp` | `--profile [delay:]seconds`: samples the game thread and prints the hottest functions from the PDB |
+
+The intro now plays to the title screen, and attract mode then starts gameplay:
+licence screen, Nick splash, THQ, THQ Australia and RenderWare, then the title.
+
+Two problems surfaced in the movie player, and both were timing or end-of-stream issues rather than decoder bugs:
+
+- **Audio drain rate.** The demuxer stops filling the video ring when the
+  audio ring is full. It then hands the IPU a padded partial quadword, and the
+  decoder hits garbage. HIS voices set up with fno 770 carry 16-bit stereo PCM
+  (the movies' `SShd` audio), so they drain at 4 bytes per sample, not at the
+  ADPCM rate.
+- **Exact-quadword streams.** After `sequence_end_code`, libmpeg issues an FDEC
+  that needs 32 more bits. Its wait loop then kicks empty toIPU transfers until
+  the command finishes. A starved IPU given an empty transfer reads zeros.
+
 ## Next
+
+- Rendering bugs on the title screen (overlapping logo layers) and in attract-mode gameplay (texture corruption).
+- Movies drop to about 19 pictures/s in clips with audio. Profile this.
 
 - Graphics: a GS/RenderWare bridge to draw the GIF/VIF1 output.
 - Sound: reverse the HIS driver protocol (functions 0, 512, 513, 514, ...).

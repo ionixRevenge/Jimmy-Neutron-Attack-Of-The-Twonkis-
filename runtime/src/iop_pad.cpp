@@ -13,7 +13,10 @@
 #include <xinput.h>
 
 #include <cstdio>
+#include <cstdlib>
 #include <set>
+#include <string>
+#include <vector>
 
 #include "iop.hpp"
 #include "ps2/recomp.hpp"
@@ -99,6 +102,18 @@ HostPad read_host_pad(int port) {
         set(key('A'), 1u << 15);   // square
     }
     return p;
+}
+
+// Scripted input (--input "frame:button,..."): each press is held for 6 frames.
+struct ScriptPress { uint64_t frame; uint16_t bit; };
+std::vector<ScriptPress> g_script;
+uint64_t g_frame = 0;
+
+uint16_t script_buttons() {
+    uint16_t b = 0;
+    for (const auto& s : g_script)
+        if (g_frame >= s.frame && g_frame < s.frame + 6) b |= s.bit;
+    return b;
 }
 
 void write_frames(Context* ctx, Port& pt, const HostPad& hp, bool init) {
@@ -198,8 +213,33 @@ void register_pad_mc_services() {
 namespace ps2 {
 
 void iop_vblank(Context* ctx) {
-    for (int p = 0; p < 2; ++p)
-        if (iop::g_port[p].ee) iop::write_frames(ctx, iop::g_port[p], iop::read_host_pad(p), false);
+    ++iop::g_frame;
+    for (int p = 0; p < 2; ++p) {
+        if (!iop::g_port[p].ee) continue;
+        iop::HostPad hp = iop::read_host_pad(p);
+        if (p == 0) hp.buttons |= iop::script_buttons();
+        iop::write_frames(ctx, iop::g_port[p], hp, false);
+    }
+}
+
+void pad_script(const char* spec) {
+    static const char* const names[16] = {"select", "l3", "r3", "start", "up", "right", "down", "left",
+                                          "l2", "r2", "l1", "r1", "triangle", "circle", "cross", "square"};
+    std::string s = spec;
+    size_t pos = 0;
+    while (pos < s.size()) {
+        size_t end = s.find(',', pos);
+        if (end == std::string::npos) end = s.size();
+        const std::string item = s.substr(pos, end - pos);
+        const size_t colon = item.find(':');
+        if (colon != std::string::npos) {
+            const uint64_t frame = std::strtoull(item.c_str(), nullptr, 10);
+            const std::string name = item.substr(colon + 1);
+            for (int i = 0; i < 16; ++i)
+                if (name == names[i]) iop::g_script.push_back({frame, (uint16_t)(1u << i)});
+        }
+        pos = end + 1;
+    }
 }
 
 } // namespace ps2

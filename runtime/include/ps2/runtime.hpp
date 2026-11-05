@@ -9,7 +9,7 @@
 namespace ps2 {
 
 // ---- logging -------------------------------------------------------------------
-enum class Log { Kernel, Mem, Cpu, Hle, Boot, Iop };
+enum class Log { Kernel, Mem, Cpu, Hle, Boot, Iop, Gpu };
 void log(Log ch, const char* fmt, ...);
 bool log_enabled(Log ch);
 
@@ -22,8 +22,14 @@ void kernel_init(Context* ctx);
 void kernel_syscall(Context* ctx, uint32_t pc);
 void kernel_poll(Context* ctx);   // deliver due interrupts at a safe point
 uint64_t kernel_syscall_count();
+void gpu_vblank(Context* ctx);
+void pad_script(const char* spec);   // --input "frame:button,..."
+void profiler_start(double delay, double seconds);   // --profile: sample the game thread, print hot functions, exit
+void display_config(bool window, const char* shot_path, const char* shot_frames);
+void display_present(const uint32_t* rgb, uint32_t w, uint32_t h, uint64_t frame);       // once per frame: present, statistics
 uint32_t timer_poll_irqs();          // EE timer compare/overflow events -> INTC causes
 void kernel_raise_dmac(int channel);   // a DMA channel finished: run its DMAC handlers
+void kernel_raise_intc(int cause);     // an INTC source (IPU, ...) fired: run its INTC handlers
 void dump_trace();               // recent guest function entries (services.cpp)
 void write_trace_file();         // full trace ring to $TWONK_TRACE_FILE, if set
 

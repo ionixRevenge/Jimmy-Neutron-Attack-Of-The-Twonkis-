@@ -13,8 +13,18 @@
 //   fno 263  service the read queue (the EE polls 258/263 until done)
 //   fno 265  file size(file id)
 //   fno 270  stream pause/resume around fileio access
+//   fno 768  voice command { u16 voice, u16 cmd, u32 addr, u32 size, u32 start }:
+//            cmd 0x13 starts streaming SPU2 ADPCM from an IOP ring buffer, cmd 2 stops
+//   fno 769  { u16 voice } -> current play address in that ring (the EE refills behind it)
+//   fno 770  { voice, iop buffer, size, block } block-transfer (PCM) buffer setup
+//   fno 771  { u16 cmd, u16 value }: 0x0201 = sample rate, 0x0f81/0x1081 = volumes, ...
+// Until the SPU2 is emulated, streaming voices are virtual: their play position
+// advances in real time at the stream's byte rate, which paces the game's stream
+// pumps (movies, music). Too slow a rate starves the movie demuxer: its audio ring
+// fills, so it hands the IPU a partial qword and the video decode hits garbage.
 // Reads complete synchronously here, so a request is already finished when 257 returns.
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <set>
@@ -73,6 +83,50 @@ uint32_t disc_read(Call& c) {
     return g_next_handle++;
 }
 
+// ---- virtual stream voices ------------------------------------------------------------
+struct Voice {
+    bool active = false;
+    uint32_t addr = 0, size = 0, start = 0;
+    std::chrono::steady_clock::time_point t0;
+};
+Voice g_voice[48];
+uint32_t g_sample_rate = 48000;
+
+// fno 770 sets up a block-transfer buffer: those voices carry 16-bit stereo PCM
+// (the movies' SShd audio), everything else SPU2 ADPCM.
+bool g_pcm[48];
+double bytes_per_second(uint32_t voice) {
+    return g_pcm[voice] ? g_sample_rate * 4.0 : g_sample_rate / 28.0 * 16.0;
+}
+
+uint32_t voice_command(Call& c) {
+    const uint32_t w0 = rd32(c.buff), voice = w0 & 0xFFFF, cmd = w0 >> 16;
+    if (voice >= 48) return 0;
+    Voice& v = g_voice[voice];
+    switch (cmd) {
+    case 0x13:
+        v.active = true;
+        v.addr = rd32(c.buff + 4);
+        v.size = rd32(c.buff + 8);
+        v.start = rd32(c.buff + 12) - v.addr;
+        v.t0 = std::chrono::steady_clock::now();
+        log(Log::Iop, "his voice %u: stream %08x size %x", voice, v.addr, v.size);
+        break;
+    case 2: v.active = false; break;
+    default: break;
+    }
+    return 0;
+}
+
+uint32_t voice_position(Call& c) {
+    const uint32_t voice = rd32(c.buff) & 0xFFFF;
+    if (voice >= 48 || !g_voice[voice].active || !g_voice[voice].size) return voice < 48 ? g_voice[voice].addr : 0;
+    const Voice& v = g_voice[voice];
+    const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - v.t0).count();
+    const uint64_t played = (uint64_t)(secs * bytes_per_second(voice)) & ~15ull;
+    return v.addr + (uint32_t)((v.start + played) % v.size);
+}
+
 uint32_t his_rpc(Call& c) {
     uint32_t result = 0;
     switch (c.fno) {
@@ -82,10 +136,23 @@ uint32_t his_rpc(Call& c) {
     case 265: result = file_size(rd32(c.buff)); break;
     case 258: result = kReadDone; break;
     case 260: case 263: case 270: break;
-    default:
+    case 768: result = voice_command(c); break;
+    case 769: result = voice_position(c); break;
+    case 770: case 771:
+        if (c.fno == 770) {
+            if ((rd32(c.buff) & 0xFFFF) < 48) g_pcm[rd32(c.buff) & 0xFFFF] = true;
+            break;
+        }
+        if ((rd32(c.buff) & 0xFFFF) == 0x0201 && (rd32(c.buff) >> 16)) g_sample_rate = rd32(c.buff) >> 16;
+        break;
+    default: {
         if (g_seen.insert(c.fno).second)
             std::fprintf(stderr, "[iop] sound driver: function %u (send %u, recv %u) - no audio yet\n", c.fno, c.ssize, c.rsize);
+        static int dumped[1024];
+        if (log_enabled(Log::Iop) && c.fno < 1024 && dumped[c.fno]++ < 6)
+            log(Log::Iop, "his fno %u payload %08x %08x %08x %08x", c.fno, rd32(c.buff), rd32(c.buff + 4), rd32(c.buff + 8), rd32(c.buff + 12));
         break;
+    }
     }
     std::memset(ram(c.buff, std::max(c.rsize, 4u)), 0, c.rsize);
     wr32(c.buff, result);

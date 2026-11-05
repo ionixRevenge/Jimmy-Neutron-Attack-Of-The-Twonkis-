@@ -62,7 +62,7 @@ struct Kernel {
     std::vector<std::pair<int, Handler>> intc, dmac;   // registration order matters
     std::map<int, Alarm> alarms;
     uint32_t intc_mask = 0, dmac_mask = 0;
-    uint32_t dmac_pending = 0;
+    uint32_t dmac_pending = 0, intc_pending = 0;
     int next_thread = 2, next_sema = 1, next_handler = 1, next_alarm = 1;
     int current = 1;
     bool in_interrupt = false;
@@ -136,6 +136,7 @@ bool deliver_interrupts(Context* ctx) {
     if (vs > K.vsyncs_delivered) {
         K.vsyncs_delivered = vs;   // drop missed frames rather than flooding
         iop_vblank(ctx);
+        gpu_vblank(ctx);
         for (uint32_t cause : {2u, 3u}) {   // INTC_VBLANK_S, INTC_VBLANK_E
             if (!(K.intc_mask & (1u << cause))) continue;
             for (auto& h : K.intc)
@@ -149,6 +150,15 @@ bool deliver_interrupts(Context* ctx) {
             for (auto& h : K.intc)
                 if (h.second.cause == cause) { run_handler(ctx, h.second.func, h.second.gp, cause, h.second.arg, 0); any = true; }
         }
+    // other INTC sources raised by the hardware model (IPU)
+    if (const uint32_t ic = K.intc_pending & K.intc_mask) {
+        K.intc_pending &= ~ic;
+        for (uint32_t cause = 0; cause < 32; ++cause) {
+            if (!(ic & (1u << cause))) continue;
+            for (auto& h : K.intc)
+                if (h.second.cause == cause) { run_handler(ctx, h.second.func, h.second.gp, cause, h.second.arg, 0); any = true; }
+        }
+    }
     const uint64_t hs = K.hsync_now();
     for (auto it = K.alarms.begin(); it != K.alarms.end();) {
         if (it->second.due_hsync <= hs) {
@@ -269,6 +279,7 @@ void kernel_poll(Context* ctx);
 static uint64_t g_syscalls = 0;
 uint64_t kernel_syscall_count() { return g_syscalls; }
 void kernel_raise_dmac(int ch) { if (ch != 5) K.dmac_pending |= 1u << ch; }
+void kernel_raise_intc(int cause) { K.intc_pending |= 1u << cause; }
 
 void kernel_syscall(Context* ctx, uint32_t pc) {
     ++g_syscalls;

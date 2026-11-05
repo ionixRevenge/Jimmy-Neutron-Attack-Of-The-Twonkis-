@@ -22,10 +22,17 @@ add_library(ps2runtime STATIC
   runtime/src/disc.cpp
   runtime/src/hw.cpp
   runtime/src/vu.cpp
+  runtime/src/vif.cpp
+  runtime/src/ipu.cpp
+  runtime/src/profiler.cpp
+  runtime/src/vu1.cpp
+  runtime/src/gif.cpp
+  runtime/src/gs.cpp
+  runtime/src/display.cpp
 )
 target_include_directories(ps2runtime PUBLIC runtime/include)
 if(MSVC)
-  target_compile_options(ps2runtime PRIVATE /W4 /permissive-)
+  target_compile_options(ps2runtime PRIVATE /W4 /permissive- /Zi /FS)
 endif()
 
 # Recompiled game code, produced by: twonkrecomp gen ... <TWONK_GENERATED_DIR>
@@ -47,6 +54,6 @@ if(TWONK_GENERATED_DIR)
   add_executable(twonk runtime/src/host_main.cpp)
   target_link_libraries(twonk PRIVATE twonk_game ps2runtime)
   if(MSVC)
-    target_link_options(twonk PRIVATE /STACK:67108864)
+    target_link_options(twonk PRIVATE /STACK:67108864 /DEBUG /OPT:REF /OPT:ICF)
   endif()
 endif()

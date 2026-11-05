@@ -10,6 +10,8 @@
 #include <cstring>
 #include <unordered_map>
 
+#include "gpu.hpp"
+#include "ipu.hpp"
 #include "ps2/recomp.hpp"
 #include "ps2/runtime.hpp"
 
@@ -98,24 +100,14 @@ constexpr uint32_t kDmaBase[10] = {0x10008000, 0x10009000, 0x1000A000, 0x1000B00
 const char* const kDmaName[10] = {"VIF0", "VIF1", "GIF", "fromIPU", "toIPU", "SIF0", "SIF1", "SIF2", "fromSPR", "toSPR"};
 uint64_t g_dma_count[10];
 
-// PATH3 masking (GIF_STAT.M3P): a VIF1 MSKPATH3 code holds GIF DMA back. The game
-// starts a GIF transfer while masked, waits until it sits in the GIF FIFO (FQC != 0),
-// then runs VIF1, whose packet lifts the mask. Without VIF/GS emulation: a GIF DMA
-// started while masked stays pending until the next VIF1 DMA completes.
-bool g_m3p = false, g_gif_stalled = false;
+// PATH3 masking: a GIF transfer started while VIF1's MSKPATH3 is on waits (its
+// data sits in the GIF FIFO, FQC != 0) until VIF1 lifts the mask.
+bool g_gif_stalled = false;
 
 void finish_dma(Context* ctx, int ch) {
     g_regs[kDmaBase[ch]] &= ~0x100u;        // STR: transfer finished
     g_regs[0x1000E010] |= 1u << ch;         // D_STAT CIS
     kernel_raise_dmac(ch);
-}
-
-// VIF codes written straight into the VIF1 FIFO (two per 64-bit store).
-void vif1_fifo_write(uint64_t v, int size) {
-    for (int i = 0; i < size / 4; ++i) {
-        const uint32_t code = (uint32_t)(v >> (32 * i));
-        if (((code >> 24) & 0x7F) == 0x06) g_m3p = (code & 0x8000) != 0;   // MSKPATH3
-    }
 }
 
 int dma_channel(uint32_t a) {
@@ -124,47 +116,137 @@ int dma_channel(uint32_t a) {
     return -1;
 }
 
+// Physical DMA address -> host memory (bit 31 of MADR / bit 63 of a tag selects scratchpad).
+uint8_t* dma_mem(Context* ctx, uint32_t addr, bool spr, uint32_t qwc) {
+    if (spr || (addr & 0x80000000u)) return ctx->spr + (addr & (kSprSize - 1) & ~15u);
+    const uint32_t a = addr & 0x1FFFFFF0u;
+    if (a + qwc * 16 > kRamSize) fatal(ctx, addr, "DMA transfer outside RAM");
+    return ctx->ram + a;
+}
+
+// Sends `qwc` quadwords to channel 1 (VIF1) or 2 (GIF PATH3). Scratchpad sources wrap.
+void dma_send(Context* ctx, int ch, uint32_t addr, bool spr, uint32_t qwc) {
+    if (!qwc) return;
+    if (ch == 9) {   // toSPR: memory -> scratchpad at SADR
+        uint32_t& sadr = g_regs[kDmaBase[9] + 0x80];
+        for (uint32_t i = 0; i < qwc; ++i) {
+            std::memcpy(ctx->spr + (sadr & (kSprSize - 1) & ~15u), dma_mem(ctx, addr + i * 16, spr, 1), 16);
+            sadr += 16;
+        }
+        return;
+    }
+    if (spr || (addr & 0x80000000u)) {
+        for (uint32_t i = 0; i < qwc; ++i) {
+            const uint8_t* q = ctx->spr + ((addr + i * 16) & (kSprSize - 1) & ~15u);
+            if (ch == 1) gpu::vif1_write(ctx, q, 1); else gpu::gif_write(gpu::Path::P3, q, 1);
+        }
+        return;
+    }
+    const uint8_t* p = dma_mem(ctx, addr, false, qwc);
+    if (ch == 1) gpu::vif1_write(ctx, p, qwc); else gpu::gif_write(gpu::Path::P3, p, qwc);
+}
+
+// Source-chain DMA (EE manual, DMAC chapter): tags refe/cnt/next/ref/refs/call/ret/end.
+void run_chain(Context* ctx, int ch) {
+    const uint32_t base = kDmaBase[ch];
+    uint32_t& chcr = g_regs[base];
+    uint32_t& madr = g_regs[base + 0x10];
+    uint32_t& qwc = g_regs[base + 0x20];
+    uint32_t& tadr = g_regs[base + 0x30];
+    const bool tte = (chcr >> 6) & 1;
+    uint32_t stack[2] = {g_regs[base + 0x40], g_regs[base + 0x50]};
+    uint32_t asp = (chcr >> 4) & 3;
+    // QWC left over from a previous (suspended) transfer goes first
+    if (qwc) { dma_send(ctx, ch, madr, false, qwc); madr += qwc * 16; qwc = 0; }
+    for (int guard = 0; guard < 1 << 20; ++guard) {
+        const uint8_t* t = dma_mem(ctx, tadr, false, 1);
+        uint64_t tag;
+        std::memcpy(&tag, t, 8);
+        const uint32_t n = (uint32_t)(tag & 0xFFFF), id = (uint32_t)((tag >> 28) & 7);
+        const uint32_t addr = (uint32_t)((tag >> 32) & 0x7FFFFFF0u);
+        const bool spr = (tag >> 63) & 1, irq = (tag >> 31) & 1;
+        chcr = (chcr & 0xFFFF) | (uint32_t)(tag & 0xFFFF0000u);   // TAG field mirrors the tag's upper half
+        if (tte && ch == 1) gpu::vif1_fifo_words(ctx, reinterpret_cast<const uint32_t*>(t + 8), 2);
+        bool end = false;
+        switch (id) {
+        case 0:  dma_send(ctx, ch, addr, spr, n); tadr += 16; end = true; break;              // refe
+        case 1:  dma_send(ctx, ch, tadr + 16, false, n); tadr += 16 + n * 16; break;          // cnt
+        case 2:  dma_send(ctx, ch, tadr + 16, false, n); tadr = addr; break;                  // next
+        case 3: case 4: dma_send(ctx, ch, addr, spr, n); tadr += 16; break;                   // ref / refs
+        case 5:                                                                               // call
+            dma_send(ctx, ch, tadr + 16, false, n);
+            if (asp >= 2) fatal(ctx, tadr, "DMA call stack overflow");
+            stack[asp++] = tadr + 16 + n * 16;
+            tadr = addr;
+            break;
+        case 6:                                                                               // ret
+            dma_send(ctx, ch, tadr + 16, false, n);
+            if (asp) tadr = stack[--asp];
+            else { tadr += 16 + n * 16; end = true; }
+            break;
+        default: dma_send(ctx, ch, tadr + 16, false, n); tadr += 16 + n * 16; end = true; break;  // end
+        }
+        if (end || (irq && (chcr & 0x80))) break;   // TIE: stop at an IRQ tag
+    }
+    chcr = (chcr & ~0x30u) | (asp << 4);
+    g_regs[base + 0x40] = stack[0];
+    g_regs[base + 0x50] = stack[1];
+}
+
 void run_dma(Context* ctx, int ch) {
     const uint32_t base = kDmaBase[ch];
     uint32_t& chcr = g_regs[base];
     const uint32_t mode = (chcr >> 2) & 3;   // 0 normal, 1 chain, 2 interleave
     uint32_t& madr = g_regs[base + 0x10];
     uint32_t& qwc = g_regs[base + 0x20];
+    if (g_dma_count[ch]++ == 0) log(Log::Boot, "first %s DMA (mode %u)", kDmaName[ch], mode);
+    if (ch == 2 && gpu::vif1_mskpath3()) {   // PATH3 masked: wait for VIF1
+        g_gif_stalled = true;
+        return;
+    }
     if ((ch == 8 || ch == 9) && mode == 0) {
         uint32_t& sadr = g_regs[base + 0x80];
         for (uint32_t i = 0; i < qwc; ++i) {
             uint8_t* spr = ctx->spr + ((sadr + i * 16) & (kSprSize - 1));
-            uint8_t* mem = host_ptr(ctx, (madr & 0x7FFFFFF0u) + i * 16);
-            if (!mem) fatal(ctx, madr, "SPR DMA: memory address is not RAM");
+            uint8_t* mem = dma_mem(ctx, madr + i * 16, false, 1);
             if (ch == 8) std::memcpy(mem, spr, 16);
             else std::memcpy(spr, mem, 16);
         }
         madr += qwc * 16;
         sadr += qwc * 16;
         qwc = 0;
+    } else if (ch == 9 && mode == 1) {
+        run_chain(ctx, ch);
     } else if (ch == 8 || ch == 9) {
-        fatal(ctx, base, "SPR DMA in chain/interleave mode is not implemented");
+        fatal(ctx, base, "SPR DMA in this mode is not implemented");
+    } else if (ch == 1 || ch == 2) {
+        if (ch == 1 && !(chcr & 1)) fatal(ctx, base, "VIF1 DMA towards memory is not implemented");
+        if (mode == 1) run_chain(ctx, ch);
+        else { dma_send(ctx, ch, madr, false, qwc); madr += qwc * 16; qwc = 0; }
+    } else if (ch == 3 || ch == 4) {
+        ipu::dma_start(ctx, ch);   // the IPU completes the transfer as data moves
+        return;
     } else if (ch == 5 || ch == 6 || ch == 7) {
         // SIF channels are driven by the SIF syscalls (iop.cpp), never directly
     } else {
+        static unsigned warned;
+        if (warned++ < 8) log(Log::Gpu, "%s DMA ignored (mode %u, qwc %u)", kDmaName[ch], mode, qwc);
         if (mode == 0) { madr += qwc * 16; qwc = 0; }
     }
-    if (g_dma_count[ch]++ == 0) log(Log::Boot, "first %s DMA (mode %u)", kDmaName[ch], mode);
-    if (ch == 2 && g_m3p) {   // PATH3 masked: the data waits in the GIF FIFO
-        g_gif_stalled = true;
-        return;
-    }
     finish_dma(ctx, ch);
-    if (ch == 1 && g_m3p) {   // the VIF1 packet unmasks PATH3
-        g_m3p = false;
-        if (g_gif_stalled) {
-            g_gif_stalled = false;
-            finish_dma(ctx, 2);
-        }
-    }
 }
 
 } // namespace
+
+uint32_t& hw_reg(uint32_t addr) { return g_regs[addr]; }
+void dma_complete(Context* ctx, int ch) { finish_dma(ctx, ch); }
+
+// VIF1 lifted the PATH3 mask: a GIF transfer that was waiting runs now.
+void gif_path3_resume(Context* ctx) {
+    if (!g_gif_stalled) return;
+    g_gif_stalled = false;
+    run_dma(ctx, 2);
+}
 
 // Compare/overflow events since the last call: sets EQUF/OVFF and returns the INTC
 // causes (9 + timer) whose interrupt is enabled. Timer 3 belongs to the kernel alarms.
@@ -192,7 +274,7 @@ uint32_t timer_poll_irqs() {
     return causes;
 }
 
-uint32_t mmio_read(Context* ctx, uint32_t addr, int size) {
+uint64_t mmio_read(Context* ctx, uint32_t addr, int size) {
     g_poll_tick += 16;   // register polls reach the interrupt delivery point sooner
     if (g_poll_tick >= 4096u) poll_point(ctx);
     const uint32_t a = addr & 0x1FFFFFFF;   // strip kseg0/kseg1
@@ -209,6 +291,7 @@ uint32_t mmio_read(Context* ctx, uint32_t addr, int size) {
         g_same_read_count = 0;
     }
 
+    if (ipu::owns(a)) return ipu::mmio_read(ctx, a);
     int ti, tr;
     if (timer_reg(a, &ti, &tr)) {
         const Timer& t = g_timer[ti];
@@ -225,7 +308,7 @@ uint32_t mmio_read(Context* ctx, uint32_t addr, int size) {
         return 0x0000000Cu | ((uint32_t)(frames & 1) << 13) | (g_regs[a] & ~0x200Fu);
     }
     case 0x10003020:   // GIF_STAT: M3P, and FQC = 16 while a masked transfer waits
-        return (g_m3p ? 0x2u : 0u) | (g_gif_stalled ? 16u << 24 : 0u);
+        return (gpu::vif1_mskpath3() ? 0x2u : 0u) | (g_gif_stalled ? 16u << 24 : 0u);
     case 0x1000E010: return g_regs[a];   // D_STAT
     case 0x1000F000: latch_vblank(); return g_regs[a];   // INTC_STAT
     case 0x1000F010: return g_regs[a];   // INTC_MASK
@@ -242,7 +325,13 @@ void mmio_write(Context* ctx, uint32_t addr, uint64_t value, int size) {
     const uint32_t a = addr & 0x1FFFFFFF;
     const uint32_t v = (uint32_t)value;
     g_last_read_addr = 0;   // a write breaks a polling streak
-    if (a >= 0x10005000 && a < 0x10006000) { vif1_fifo_write(value, size); return; }
+    if (a >= 0x10005000 && a < 0x10006000) {   // VIF1 FIFO: VIF codes / data
+        const uint32_t w[2] = {(uint32_t)value, (uint32_t)(value >> 32)};
+        gpu::vif1_fifo_words(ctx, w, size / 4);
+        return;
+    }
+    if (a >= 0x12000000 && a < 0x12001000) gpu::gs_priv_write(a, value);
+    if (ipu::owns(a)) { ipu::mmio_write(ctx, a, value); return; }
 
     int ti, tr;
     if (timer_reg(a, &ti, &tr)) {
