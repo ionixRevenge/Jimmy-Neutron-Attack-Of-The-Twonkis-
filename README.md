@@ -35,6 +35,20 @@ or Sony Interactive Entertainment.
 | Disc | PS2 USA, `SLUS-208.87`, disc version 1.01, NTSC |
 | Executable | `SLUS_208.87`, SHA-1 `3dc783935b4a853ad42f97a6c1697aae128ffca3` |
 
+## Easy setup
+
+Double-click **`Setup.cmd`**. The setup window:
+
+1. checks for the build tools (Visual Studio C++ build tools, CMake, Python 3) and
+   can install missing ones with `winget`;
+2. asks for your disc image and checks that it is the supported version;
+3. moves it into `Game iso/` (or copies it, if you choose), then runs every build
+   step below and can add a desktop shortcut.
+
+The build takes a while. Progress is shown in the window and saved to
+`local/logs/setup.log`. Without the window:
+`powershell -ExecutionPolicy Bypass -File tools/setup/setup.ps1 -Headless -Iso <image> [-Copy]`.
+
 ## Building
 
 Requirements: Windows 10/11, Visual Studio 2022 (C++ desktop workload), CMake 3.20+,
