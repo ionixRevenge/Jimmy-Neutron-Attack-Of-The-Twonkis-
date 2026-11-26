@@ -21,6 +21,7 @@ struct Vu1 {
     alignas(16) uint8_t micro[kVu1MicroSize];
 };
 Vu1& vu1();
+int vu1_bench(const char* snapshot, int runs);   // --vu-bench: replay a TWONK_VU_SNAP snapshot
 
 // VIF1 consumes `qwc` quadwords (the tag's upper half arrives first with TTE).
 void vif1_write(Context* ctx, const uint8_t* data, uint32_t qwc);
@@ -39,7 +40,8 @@ void gs_vertex_kick(bool draw);                            // XYZ2/XYZF2 (draw) 
 void gs_image_data(const uint8_t* data, uint32_t qwc);     // HWREG / IMAGE transfer
 void gs_priv_write(uint32_t addr, uint64_t value);         // 0x12000000 block
 uint64_t gs_priv_read(uint32_t addr);
-bool gs_display(std::vector<uint32_t>* rgb, uint32_t* w, uint32_t* h);   // the picture on screen
+uint64_t gs_flip_count();   // DISPFB changes so far: the game's own frame count
+void gs_present(uint64_t frame);   // vblank: show the picture on screen (on the GS thread)
 
 // ---- statistics (printed by `--log gpu`) -----------------------------------------
 struct Stats {

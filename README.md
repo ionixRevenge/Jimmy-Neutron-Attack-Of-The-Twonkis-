@@ -1,50 +1,98 @@
-# Jimmy Neutron: Attack of the Twonkies — Decomp / PC Port
+# Jimmy Neutron: Attack of the Twonkies — PC port (static recompilation)
 
-Decompilation of *Nickelodeon Jimmy Neutron: Boy Genius — Attack of the Twonkies*
-(PS2, USA) aimed at a native Windows port.
+A native Windows port of *Nickelodeon Jimmy Neutron: Boy Genius — Attack of the
+Twonkies* (PS2, USA). The game's Emotion Engine code is statically recompiled to
+C++ and linked against a runtime that provides the PS2 hardware natively: kernel,
+IOP services, GS (Direct3D 11), VU1, IPU movies, SPU2 audio, pad and memory card.
 
-**No game data is included or ever committed.** You need your own copy of the disc.
+## No game content
 
-## Target
+**This repository contains no game data, code or assets, and none may be added.**
+You need your own legally obtained copy of the disc. Everything game-specific is
+produced on your machine from your disc and stays out of git (see `.gitignore`):
+
+| Made locally from your disc | Where |
+|---|---|
+| Extracted disc files and the executable | `extracted/` |
+| Function list (contains the executable's strings) | `analysis/functions.tsv` |
+| Recompiled C++ | `build/generated/` |
+| VU1 microcode dumps, snapshots, logs | `analysis/vu_dumps/`, `local/` |
+| Texture dumps and upscaled texture packs | `texture_dump/`, `textures/` |
+| Saves and settings | `memcard/`, `twonk_settings.ini` |
+
+What *is* here is original work: the recompiler, the runtime, tools, and
+documentation. The files in `config/` and the hooks in the runtime refer to the
+game only by addresses. No PS2 BIOS is used or needed.
+
+*Jimmy Neutron* and related names are trademarks of their respective owners. This
+project is not affiliated with or endorsed by Nickelodeon, Viacom/Paramount, THQ,
+or Sony Interactive Entertainment.
+
+## Supported disc
 
 | | |
 |---|---|
 | Disc | PS2 USA, `SLUS-208.87`, disc version 1.01, NTSC |
 | Executable | `SLUS_208.87`, SHA-1 `3dc783935b4a853ad42f97a6c1697aae128ffca3` |
-| Code | One `main` segment at `0x00100000` (3.6 MB), entry point `0x00100008`, **no symbols (stripped)** |
-| Compiler | Metrowerks CodeWarrior, `MW MIPS C Compiler (2.4.1.01)` |
-| Engine | RenderWare 3.6 (Sky2/PS2 backend). Plugins: MatFX, PTank, HAnim, UVAnim, Rt2d, PITexDict |
-| Game code | C++ (`PS2All.cpp`, `slXml.cpp`, `THQFont.cpp`, ...) |
-| IOP modules | `LIBSD`, `PADMAN`, `MCMAN`/`MCSERV`, `SIO2MAN`, `HIS`, `IOPRP300.IMG` |
 
-## Data formats
+## Building
 
-- `DATA/*.PAK`: archives with the `kcap` magic; the format is documented in `tools/extract_pak.py`.
-  There are 23 archives, about 11k files.
-- Inside the archives:
-  - `.rws`: RenderWare streams (models, textures, worlds).
-  - `.anm`: animations (RW HAnim).
-  - `.gm`, `.fx`, `.csr`, `.str`, `.xml`, `.rad`, `.fon`, `.sounds`, `.fmv`: game-specific formats, not yet decoded.
-
-## Setup
+Requirements: Windows 10/11, Visual Studio 2022 (C++ desktop workload), CMake 3.20+,
+Python 3 (plus `numpy` and `Pillow` for the texture tools).
 
 ```sh
-python tools/extract_iso.py "Game iso/<game>.iso" extracted/disc
-python tools/extract_pak.py extracted/disc/DATA extracted/data
+# 1. Extract your disc image
+python tools/extract_iso.py "Game iso/<your image>.iso" extracted/disc
+
+# 2. Analyse the executable (writes analysis/functions.tsv)
+python -I tools/analysis/elfmap.py extracted/disc/SLUS_208.87 analysis 36ef00
+
+# 3. Build the recompiler and recompile the game code
+cmake -S recomp -B recomp/build && cmake --build recomp/build --config Release
+recomp/build/Release/twonkrecomp gen extracted/disc/SLUS_208.87 config/regions.txt analysis/functions.tsv build/generated config/hle.txt
+
+# 4. Build the port
+cmake -S . -B build/msvc -DTWONK_GENERATED_DIR=<absolute path>/build/generated
+cmake --build build/msvc --config Release --target twonk --parallel
 ```
 
-## Roadmap
+Optional, for speed: VU1 microcode runs interpreted until it is compiled ahead of
+time. Play with `TWONK_VU_DUMP=analysis/vu_dumps` set to collect the programs, then
+run `twonk --vu-aot analysis/vu_dumps build/generated/vu1_aot_gen.inc` and rebuild.
+See `docs/runtime.md`.
 
-1. **Analysis.** Load the ELF into Ghidra with a MIPS R5900 (Emotion Engine) loader.
-   Identify RenderWare 3.6 functions using the RW assert/ID strings and signatures.
-   This isolates the engine code from the game code.
-2. **Disassembly split.** Use `splat` to split the ELF into per-function asm and data,
-   and maintain a symbol map.
-3. **Decompile game code to C++.** Work subsystem by subsystem: boot/main loop,
-   file system/PAK, XML/scripting, entities, player, camera, UI, audio.
-4. **Platform layer.** Replace PS2 hardware and SDK use (GS/VU1 DMA, SPU2, pad,
-   memory card, CD) with SDL2 for windowing, input and audio. Saves go to files.
-5. **Renderer.** Replace RenderWare Sky2 with [librw](https://github.com/aap/librw),
-   an open-source RW reimplementation. It can read PS2-native RW geometry and
-   texture dictionaries, and renders through D3D9 or OpenGL.
-6. **Video and audio.** Decode the FMV and stream formats.
+## Running
+
+```sh
+build/msvc/Release/twonk.exe extracted/disc/SLUS_208.87 --iso "Game iso/<your image>.iso" --memcard memcard
+```
+
+| Key | |
+|---|---|
+| F4 | Video settings: resolution (auto, 1-8x), supersampling, upscale filter, sharp text, aspect ratio (4:3, 16:9, 16:10, 21:9, stretch), fullscreen |
+| Alt+Enter / F11 | Fullscreen |
+| F1 | FPS counter |
+| START in a cutscene | Fast-forward |
+
+Command-line options: `--scale N`, `--aspect 16:9`, `--fullscreen`, `--renderer sw`,
+`--no-window`, `--log <channels>`, `--memcard <dir>`.
+
+### Upscaled textures (optional)
+
+Run once with `TWONK_TEX_DUMP=texture_dump` to dump the textures you see, then
+build a pack with `python tools/texpack_upscale.py`. It uses
+[Real-ESRGAN ncnn-vulkan](https://github.com/xinntao/Real-ESRGAN) when you have
+downloaded it into `tools/realesrgan/`, and Lanczos otherwise. Solid wall and floor
+textures keep more detail with `--model realesrgan-x4plus`. The game loads packs
+from `textures/`.
+
+## License
+
+The code and documentation here are under the MIT License (see `LICENSE`). It
+covers this project only, not the game.
+
+## Documentation
+
+- `docs/recompiler.md`: how the recompiler works.
+- `docs/runtime.md`: the runtime and its hardware emulation.
+- `docs/M0-binary-map.md`: the layout of the executable.

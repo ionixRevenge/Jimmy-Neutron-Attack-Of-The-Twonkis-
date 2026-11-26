@@ -11,13 +11,16 @@
 #include <windows.h>
 #include <xinput.h>
 
+#include <chrono>
 #include <cstdio>
+#include <cstring>
 #include <cstdlib>
 #include <set>
 #include <string>
 #include <vector>
 
 #include "iop.hpp"
+#include "iop_irx.hpp"
 #include "ps2/recomp.hpp"
 #include "ps2/runtime.hpp"
 
@@ -82,7 +85,7 @@ HostPad read_host_pad(int port) {
         p.rx = axis(xs.Gamepad.sThumbRX, false);
         p.ry = axis(xs.Gamepad.sThumbRY, true);
     }
-    if (port == 0) {   // keyboard on pad 1
+    if (port == 0 && !display_menu_open()) {   // keyboard on pad 1 (not while the F4 menu has it)
         auto key = [](int vk) { return (GetAsyncKeyState(vk) & 0x8000) != 0; };
         auto set = [&](bool on, uint16_t bit) { if (on) p.buttons |= bit; };
         set(key(VK_BACK), 1u << 0);
@@ -103,15 +106,16 @@ HostPad read_host_pad(int port) {
     return p;
 }
 
-// Scripted input (--input "frame:button,..."): each press is held for 6 frames.
-struct ScriptPress { uint64_t frame; uint16_t bit; };
+// Scripted input (--input "frame:button[:frames],..."): a press is held for
+// `frames` frames, 15 by default.
+struct ScriptPress { uint64_t frame; uint32_t bit; uint64_t hold; };   // bits 16-19: left stick up/down/left/right
 std::vector<ScriptPress> g_script;
 uint64_t g_frame = 0;
 
-uint16_t script_buttons() {
-    uint16_t b = 0;
+uint32_t script_buttons() {
+    uint32_t b = 0;
     for (const auto& s : g_script)
-        if (g_frame >= s.frame && g_frame < s.frame + 15) b |= s.bit;
+        if (g_frame >= s.frame && g_frame < s.frame + s.hold) b |= s.bit;
     return b;
 }
 
@@ -195,19 +199,88 @@ void register_pad_mc_services() {
 
 namespace ps2 {
 
+uint16_t g_pad0_buttons;   // controller 1 as last written to the game (bit 3 = START)
+
+// Live control for testing (TWONK_LIVE=<dir>): every few frames <dir>/cmd.txt is
+// read and deleted. Lines: "input <frame>:<button>[:<hold>],..." with frames
+// relative to now (same syntax as --input), and "shot <name>" to save the next
+// frame as <dir>/<name>.png. <dir>/frame.txt always holds the current frame.
+void live_commands() {
+    static const char* dir = std::getenv("TWONK_LIVE");
+    if (!dir || iop::g_frame % 6) return;
+    const std::string base = dir;
+    if (FILE* f = std::fopen((base + "/frame.txt").c_str(), "w")) {
+        std::fprintf(f, "%llu\n", (unsigned long long)iop::g_frame);
+        std::fclose(f);
+    }
+    const std::string cmd = base + "/cmd.txt";
+    FILE* f = std::fopen(cmd.c_str(), "rb");
+    if (!f) return;
+    std::string text;
+    char buf[4096];
+    for (size_t n; (n = std::fread(buf, 1, sizeof buf, f)) > 0;) text.append(buf, n);
+    std::fclose(f);
+    std::remove(cmd.c_str());
+    size_t pos = 0;
+    while (pos < text.size()) {
+        size_t end = text.find('\n', pos);
+        if (end == std::string::npos) end = text.size();
+        std::string line = text.substr(pos, end - pos);
+        pos = end + 1;
+        while (!line.empty() && (line.back() == '\r' || line.back() == ' ')) line.pop_back();
+        if (line.rfind("input ", 0) == 0) {
+            const size_t first = iop::g_script.size();
+            pad_script(line.c_str() + 6);
+            for (size_t i = first; i < iop::g_script.size(); ++i) iop::g_script[i].frame += iop::g_frame + 1;
+        } else if (line.rfind("shot ", 0) == 0) {
+            display_request_shot((base + "/" + line.substr(5) + ".png").c_str());
+        }
+    }
+}
+
 void iop_vblank(Context* ctx) {
     ++iop::g_frame;
+    static const bool time_debug = std::getenv("TWONK_TIME_DEBUG") != nullptr;
+    if (time_debug && iop::g_frame % 120 == 0) {   // the game's frame time vs real time
+        static double t0 = 0; static uint32_t ms0 = 0;
+        const double now = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+        const uint32_t gp = ctx->r[28].u32[0];
+        uint32_t ms = 0, dtb = 0;
+        std::memcpy(&ms, guest_ptr(ctx, gp - 29108, 4), 4);
+        std::memcpy(&dtb, guest_ptr(ctx, gp - 29100, 4), 4);
+        float dt; std::memcpy(&dt, &dtb, 4);
+        uint64_t acc = 0;
+        std::memcpy(&acc, guest_ptr(ctx, gp - 29000, 8), 8);
+        static uint64_t acc0 = 0;
+        if (t0 > 0) std::fprintf(stderr, "[time] frame %llu: game %u ms, overflow clock %.0f ms, in %.0f ms real, last dt %.4f s\n",
+                                 (unsigned long long)iop::g_frame, ms - ms0, (double)(acc - acc0) / 9216.0, (now - t0) * 1000, dt);
+        std::fprintf(stderr, "[time]   timer0 events delivered %llu, dropped while masked %llu\n",
+                     (unsigned long long)g_timer_delivered[0], (unsigned long long)g_timer_dropped[0]);
+        g_timer_delivered[0] = g_timer_dropped[0] = 0;
+        t0 = now; ms0 = ms; acc0 = acc;
+    }
+    live_commands();
+    iop::irx::tick(ctx);   // the sound driver's threads (no-op without HIS.IRX)
     for (int p = 0; p < 2; ++p) {
         if (!iop::g_port[p].ee) continue;
         iop::HostPad hp = iop::read_host_pad(p);
-        if (p == 0) hp.buttons |= iop::script_buttons();
+        if (p == 0) {
+            const uint32_t sb = iop::script_buttons();
+            hp.buttons |= (uint16_t)sb;
+            if (sb & 0x10000) hp.ly = 0x00;
+            if (sb & 0x20000) hp.ly = 0xFF;
+            if (sb & 0x40000) hp.lx = 0x00;
+            if (sb & 0x80000) hp.lx = 0xFF;
+            g_pad0_buttons = hp.buttons;
+        }
         iop::write_frames(ctx, iop::g_port[p], hp, false);
     }
 }
 
 void pad_script(const char* spec) {
-    static const char* const names[16] = {"select", "l3", "r3", "start", "up", "right", "down", "left",
-                                          "l2", "r2", "l1", "r1", "triangle", "circle", "cross", "square"};
+    static const char* const names[20] = {"select", "l3", "r3", "start", "up", "right", "down", "left",
+                                          "l2", "r2", "l1", "r1", "triangle", "circle", "cross", "square",
+                                          "lup", "ldown", "lleft", "lright"};   // the last four: left stick
     std::string s = spec;
     size_t pos = 0;
     while (pos < s.size()) {
@@ -217,9 +290,14 @@ void pad_script(const char* spec) {
         const size_t colon = item.find(':');
         if (colon != std::string::npos) {
             const uint64_t frame = std::strtoull(item.c_str(), nullptr, 10);
-            const std::string name = item.substr(colon + 1);
-            for (int i = 0; i < 16; ++i)
-                if (name == names[i]) iop::g_script.push_back({frame, (uint16_t)(1u << i)});
+            std::string name = item.substr(colon + 1);
+            uint64_t hold = 15;
+            if (const size_t c2 = name.find(':'); c2 != std::string::npos) {
+                hold = std::strtoull(name.c_str() + c2 + 1, nullptr, 10);
+                name.erase(c2);
+            }
+            for (int i = 0; i < 20; ++i)
+                if (name == names[i]) iop::g_script.push_back({frame, 1u << i, hold});
         }
         pos = end + 1;
     }

@@ -1,18 +1,37 @@
-# Copyrighted game data - never commit
-Game iso/
+# Everything from or derived from the game stays out of the repository.
+# Patterns starting with / match only at the repository root.
+
+# The disc and anything extracted from it
+/Game iso/
 *.iso
-extracted/
-*.PAK
+*.ISO
+/extracted/
 *.pak
+*.PAK
 SLUS_*
-build/
+
+# Generated from the game executable: function list (holds its strings), VU1
+# microcode dumps, and the recompiled C++ (build/generated)
+/analysis/
+/build/
+/recomp/build/
+
+# Local dev artifacts: VU1 snapshots (game microcode and data), logs, scratch
+/local/
+*.bin
+*.log
+
+# Player data and settings
+/memcard/
+twonk_settings.ini
+
+# Texture dumps and packs (made from the game's textures), and the upscaler download
+/texture_dump/
+/textures/
+/tools/realesrgan/
+
+# Python and editor clutter
 __pycache__/
-# generated analysis output (derived from the game executable)
-analysis/
-
-# build output
-recomp/build/
-build/
-
-# player saves (virtual memory card)
-memcard/
+*.pyc
+.vs/
+.vscode/

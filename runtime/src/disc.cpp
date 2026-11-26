@@ -1,4 +1,5 @@
 #include "disc.hpp"
+#include "perf.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -82,6 +83,8 @@ bool read(uint32_t lba, uint32_t count, uint8_t* dst) {
     if (!S.f) return false;
     std::lock_guard<std::mutex> lk(S.m);
     uint32_t avail = lba < S.sectors ? std::min(count, S.sectors - lba) : 0;
+    PerfScope timed(kPerfDiscNs);
+    perf_add(kPerfDiscBytes, (uint64_t)count * kSector);
     if (avail) {
         _fseeki64(S.f, (int64_t)lba * kSector, SEEK_SET);
         if (std::fread(dst, kSector, avail, S.f) != avail) return false;

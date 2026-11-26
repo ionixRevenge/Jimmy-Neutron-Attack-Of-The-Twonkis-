@@ -3,3 +3,4 @@
 00117948  kernel_patch_noop      # libkernl BIOS kernel patcher (_InitSys)
 00118010  kernel_store_word      # libkernl kernel-mode "sw a1,(a0)" via eret
 00117070  kernel_patch2_noop     # libkernl kernel-code install + SetSyscall patches (_InitSys)
+0025cd40  rw_camera_set_view_window   # RenderWare RwCameraSetViewWindow: widescreen (widens screen cameras)

@@ -11,6 +11,7 @@
 #include <windows.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -22,6 +23,8 @@
 #include "ps2/runtime.hpp"
 
 namespace ps2::ipu {
+
+std::atomic<uint64_t> g_last_picture_ms{0};   // GetTickCount64 at the last IDEC/BDEC (movie_playing)
 
 namespace {
 
@@ -584,6 +587,7 @@ void raw16_to_raw8(const int16_t* in, uint8_t* out) {
 
 // ---- commands -------------------------------------------------------------------------
 void cmd_idec(uint32_t c) {
+    g_last_picture_ms.store(GetTickCount64(), std::memory_order_relaxed);
     advance(c & 0x3F);
     const bool rgb16 = (c >> 27) & 1, dtd = (c >> 24) & 1;
     int qsc = (int)((c >> 16) & 0x1F);
@@ -622,6 +626,7 @@ void cmd_idec(uint32_t c) {
 }
 
 void cmd_bdec(uint32_t c) {
+    g_last_picture_ms.store(GetTickCount64(), std::memory_order_relaxed);
     advance(c & 0x3F);
     int16_t raw[384];
     decode_macroblock((c >> 27) & 1, (c >> 26) & 1, (c >> 25) & 1, (int)((c >> 16) & 0x1F), raw);
@@ -859,3 +864,7 @@ void dma_start(Context* ctx, int ch) {
 }
 
 } // namespace ps2::ipu
+
+namespace ps2 {
+bool movie_playing() { return GetTickCount64() - ipu::g_last_picture_ms.load(std::memory_order_relaxed) < 400; }
+} // namespace ps2

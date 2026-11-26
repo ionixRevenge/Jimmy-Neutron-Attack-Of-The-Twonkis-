@@ -73,7 +73,14 @@ struct Kernel {
         return (uint64_t)(std::chrono::duration<double>(Clock::now() - t0).count() * kHsyncHz);
     }
     std::vector<LPVOID> dead_fibers;
+    Clock::time_point sif_due{};   // when the queued IOP reply arrives (zero: none queued)
 } K;
+
+// IOP reply latency. A real RPC takes the IOP a while to answer; the calling
+// thread blocks on its semaphore meanwhile and lower-priority threads run.
+// The level loader decodes on such a thread and gets no time at all when
+// replies arrive instantly.
+double g_sif_latency_us = 500;
 
 Thread& cur() { return K.threads[K.current]; }
 
@@ -128,8 +135,10 @@ void run_handler(Context* from, uint32_t func, uint32_t gp, uint32_t a0, uint32_
 void reschedule(Context* ctx);
 
 // Deliver vsync interrupts and alarms that are due. Returns true if any ran.
-bool deliver_interrupts(Context* ctx) {
+// `idle`: no thread can run, so a queued IOP reply is delivered without waiting.
+bool deliver_interrupts(Context* ctx, bool idle = false) {
     if (K.in_interrupt) return false;
+    hw_collect_gfx();   // transfers the GIF/VIF worker finished
     bool any = false;
     const double secs = std::chrono::duration<double>(Clock::now() - K.t0).count();
     const uint64_t vs = (uint64_t)(secs * kVsyncHz);
@@ -144,12 +153,16 @@ bool deliver_interrupts(Context* ctx) {
         }
     }
     // EE timers 0-2 (INTC 9-11)
-    if (const uint32_t tc = timer_poll_irqs() & K.intc_mask)
-        for (uint32_t cause = 9; cause <= 11; ++cause) {
-            if (!(tc & (1u << cause))) continue;
+    // One handler run per event: the game's clock counts timer 0 overflows.
+    for (uint32_t cause = 9; cause <= 11; ++cause)
+        for (int n = 0; n < 1024 && timer_take_event((int)cause - 9, K.intc_mask); ++n)
             for (auto& h : K.intc)
-                if (h.second.cause == cause) { run_handler(ctx, h.second.func, h.second.gp, cause, h.second.arg, 0); any = true; }
-        }
+                if (h.second.cause == cause) {
+                    g_timer_in_handler = (int)cause - 9;
+                    run_handler(ctx, h.second.func, h.second.gp, cause, h.second.arg, 0);
+                    g_timer_in_handler = -1;
+                    any = true;
+                }
     // other INTC sources raised by the hardware model (IPU)
     if (const uint32_t ic = K.intc_pending & K.intc_mask) {
         K.intc_pending &= ~ic;
@@ -181,13 +194,20 @@ bool deliver_interrupts(Context* ctx) {
             any = true;
         }
     }
-    // SIF0 (IOP -> EE): one packet per DMAC channel 5 interrupt
-    if (K.dmac_mask & (1u << 5))
-        while (iop_pop_packet(ctx)) {
+    // SIF0 (IOP -> EE): one packet per DMAC channel 5 interrupt, once the reply is due
+    if ((K.dmac_mask & (1u << 5)) && iop_packet_pending()) {
+        const auto now = Clock::now();
+        if (K.sif_due == Clock::time_point{})
+            K.sif_due = now + std::chrono::microseconds((int64_t)g_sif_latency_us);
+        if (idle || now >= K.sif_due) {
+            K.sif_due = {};
+            while (iop_pop_packet(ctx)) {
             for (auto& h : K.dmac)
                 if (h.second.cause == 5) run_handler(ctx, h.second.func, h.second.gp, 5, h.second.arg, 0);
-            any = true;
+                any = true;
+            }
         }
+    }
     return any;
 }
 
@@ -243,7 +263,7 @@ void reschedule(Context* ctx) {
             return;
         }
         // nothing runnable: wait for the next timer event
-        if (!deliver_interrupts(ctx)) std::this_thread::sleep_for(std::chrono::microseconds(500));
+        if (!deliver_interrupts(ctx, true)) std::this_thread::sleep_for(std::chrono::microseconds(500));
         if (K.intc_mask == 0 && K.alarms.empty()) fatal(ctx, 0, "deadlock: all threads waiting and no interrupt sources");
     }
 }
@@ -275,6 +295,8 @@ void kernel_init(Context* ctx) {
 }
 
 void kernel_poll(Context* ctx);
+
+void sif_latency_config(double usec) { g_sif_latency_us = usec < 0 ? 0 : usec; }
 
 static uint64_t g_syscalls = 0;
 uint64_t kernel_syscall_count() { return g_syscalls; }
@@ -612,7 +634,20 @@ uint32_t g_poll_tick = 0;
 void poll_point(Context* ctx) {
     g_poll_tick = 0;
     if (K.in_interrupt || !(ctx->cop0[12] & 0x10000u)) return;   // handler running, or guest did DI
+    const uint64_t before = g_syscalls;
     kernel_poll(ctx);
+    // A guest loop that only polls memory (waiting for a DMA or vsync interrupt)
+    // reaches its poll point with exactly the registers it had last time. Instead
+    // of burning a core the GS rasterizer needs, wait for the GIF/VIF worker to
+    // finish (that is what such a loop waits for), or give the core away.
+    static uint64_t last_gpr[32][2];
+    static int same = 0;
+    if (g_syscalls == before && std::memcmp(last_gpr, ctx->r, sizeof last_gpr) == 0) {
+        if (++same >= 2) gfx_wait_progress(500);
+    } else {
+        same = 0;
+        std::memcpy(last_gpr, ctx->r, sizeof last_gpr);
+    }
 }
 
 void kernel_poll(Context* ctx) {

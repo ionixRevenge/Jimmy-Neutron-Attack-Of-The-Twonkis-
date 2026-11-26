@@ -14,6 +14,55 @@
 #include "ps2/recomp.hpp"
 #include "ps2/runtime.hpp"
 
+namespace ps2::gpu { int vu1_bench(const char* snapshot, int runs); int vu1_aot_generate(const char* dir, const char* out); int vu1_fuzz(const char* dir, int seeds); int vif_fuzz(int rounds); }   // vu1.cpp
+
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
+#include <dbghelp.h>
+#pragma comment(lib, "dbghelp.lib")
+
+namespace {
+// A crash prints where it happened (symbols come from twonk.pdb) instead of vanishing.
+LONG WINAPI crash_report(EXCEPTION_POINTERS* ep) {
+    static volatile LONG once = 0;
+    if (InterlockedExchange(&once, 1)) return EXCEPTION_CONTINUE_SEARCH;
+    const EXCEPTION_RECORD* er = ep->ExceptionRecord;
+    std::fprintf(stderr, "\n[crash] exception %08lx at %p", er->ExceptionCode, er->ExceptionAddress);
+    if (er->ExceptionCode == EXCEPTION_ACCESS_VIOLATION && er->NumberParameters >= 2)
+        std::fprintf(stderr, " (%s %p)", er->ExceptionInformation[0] ? "writing" : "reading", (void*)er->ExceptionInformation[1]);
+    std::fprintf(stderr, " on thread %lu\n", GetCurrentThreadId());
+    HANDLE proc = GetCurrentProcess();
+    SymSetOptions(SYMOPT_LOAD_LINES | SYMOPT_UNDNAME);
+    SymInitialize(proc, nullptr, TRUE);
+    CONTEXT ctx = *ep->ContextRecord;
+    STACKFRAME64 f{};
+    f.AddrPC.Offset = ctx.Rip; f.AddrPC.Mode = AddrModeFlat;
+    f.AddrFrame.Offset = ctx.Rbp; f.AddrFrame.Mode = AddrModeFlat;
+    f.AddrStack.Offset = ctx.Rsp; f.AddrStack.Mode = AddrModeFlat;
+    for (int i = 0; i < 24; ++i) {
+        if (!StackWalk64(IMAGE_FILE_MACHINE_AMD64, proc, GetCurrentThread(), &f, &ctx, nullptr, SymFunctionTableAccess64,
+                         SymGetModuleBase64, nullptr) || !f.AddrPC.Offset)
+            break;
+        alignas(SYMBOL_INFO) char buf[sizeof(SYMBOL_INFO) + 256];
+        SYMBOL_INFO* sym = reinterpret_cast<SYMBOL_INFO*>(buf);
+        sym->SizeOfStruct = sizeof(SYMBOL_INFO);
+        sym->MaxNameLen = 255;
+        DWORD64 disp = 0;
+        IMAGEHLP_LINE64 line{};
+        line.SizeOfStruct = sizeof line;
+        DWORD ldisp = 0;
+        const bool have_sym = SymFromAddr(proc, f.AddrPC.Offset, &disp, sym) != FALSE;
+        const bool have_line = SymGetLineFromAddr64(proc, f.AddrPC.Offset, &ldisp, &line) != FALSE;
+        std::fprintf(stderr, "[crash]   %s+0x%llx", have_sym ? sym->Name : "?", (unsigned long long)disp);
+        if (have_line) std::fprintf(stderr, "  %s:%lu", line.FileName, line.LineNumber);
+        std::fprintf(stderr, "\n");
+    }
+    std::fflush(stderr);
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+} // namespace
+
 void f_00100008(ps2::Context* ctx);   // ELF entry point (generated)
 
 namespace ps2 {
@@ -75,6 +124,21 @@ static bool load_elf_into_ram(const char* path, ps2::Context* ctx) {
 }
 
 int main(int argc, char** argv) {
+    SetUnhandledExceptionFilter(crash_report);
+    if (argc >= 4 && !std::strcmp(argv[1], "--vu-aot"))   // --vu-aot <TWONK_VU_DUMP dir> <out.inc>
+        return ps2::gpu::vu1_aot_generate(argv[2], argv[3]);
+    if (argc >= 2 && !std::strcmp(argv[1], "--vif-fuzz")) return ps2::gpu::vif_fuzz(argc >= 3 ? std::atoi(argv[2]) : 20000);
+    if (argc >= 3 && !std::strcmp(argv[1], "--vu-fuzz"))   // --vu-fuzz <TWONK_VU_DUMP dir> [seeds]
+        return ps2::gpu::vu1_fuzz(argv[2], argc >= 4 ? std::atoi(argv[3]) : 4);
+    if (argc >= 3 && !std::strcmp(argv[1], "--vu-bench")) {   // --vu-bench <snapshot> [runs [profile-seconds]]
+        if (argc >= 5) {
+            ps2::game_thread_register();
+            ps2::profiler_start(0.0, std::atof(argv[4]));
+        }
+        const int rc = ps2::gpu::vu1_bench(argv[2], argc >= 4 ? std::atoi(argv[3]) : 2000);
+        if (argc >= 5) std::this_thread::sleep_for(std::chrono::duration<double>(std::atof(argv[4]) + 2.0));
+        return rc;
+    }
     if (argc < 2) {
         std::fprintf(stderr, "usage: twonk <SLUS_208.87> [--log kernel,mem,cpu,hle,boot,iop|all]\n");
         return 2;
@@ -99,7 +163,12 @@ int main(int argc, char** argv) {
                 ps2::profiler_start(colon ? std::atof(spec) : 0.0, std::atof(colon ? colon + 1 : spec));
             }
             if (!std::strcmp(argv[i], "--input") && i + 1 < argc) ps2::pad_script(argv[i + 1]);
+            if (!std::strcmp(argv[i], "--renderer") && i + 1 < argc) ps2::renderer_config(argv[i + 1], 0);   // hw | sw
+            if (!std::strcmp(argv[i], "--scale") && i + 1 < argc) ps2::video_cli(argv[i + 1], nullptr, false);   // 1-8, 0 = auto
+            if (!std::strcmp(argv[i], "--aspect") && i + 1 < argc) ps2::video_cli(nullptr, argv[i + 1], false);  // 4:3 16:9 16:10 21:9 stretch
+            if (!std::strcmp(argv[i], "--fullscreen")) ps2::video_cli(nullptr, nullptr, true);
             if (!std::strcmp(argv[i], "--memcard") && i + 1 < argc) ps2::memcard_config(argv[i + 1]);
+            if (!std::strcmp(argv[i], "--sif-latency") && i + 1 < argc) ps2::sif_latency_config(std::atof(argv[i + 1]));
             if (!std::strcmp(argv[i], "--shot") && i + 1 < argc) {
                 shot_path = argv[i + 1];
                 const size_t colon = shot_path.rfind(':');
@@ -140,6 +209,7 @@ int main(int argc, char** argv) {
             ps2::log(ps2::Log::Boot, "disc: %s", argv[i + 1]);
     }
     ps2::kernel_init(&ctx);
+    ps2::game_thread_register();
     // Hang watchdog: no syscall for 5 s means the guest is spinning on memory.
     std::thread([] {
         uint64_t last = ~0ull;
@@ -149,6 +219,8 @@ int main(int argc, char** argv) {
             if (n == last) {
                 std::fprintf(stderr, "[ps2] watchdog: no syscall for 5 s, guest appears stuck\n");
                 ps2::dump_trace();
+                ps2::dump_hw_state();
+                ps2::dump_game_stack();
                 std::_Exit(3);
             }
             last = n;

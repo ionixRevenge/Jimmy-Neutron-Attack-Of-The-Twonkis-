@@ -333,6 +333,8 @@ void sif_syscall(Context* ctx, int call) {
     (void)kRegMscom;
 }
 
+bool iop_packet_pending() { return !iop::S.to_ee.empty() && iop::S.ee_buf; }
+
 bool iop_pop_packet(Context* ctx) {
     using namespace iop;
     if (S.to_ee.empty() || !S.ee_buf) return false;

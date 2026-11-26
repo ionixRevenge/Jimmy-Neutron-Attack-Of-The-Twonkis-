@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 
 #include "ps2/recomp.hpp"
 #include "ps2/runtime.hpp"
@@ -71,7 +72,45 @@ void unimplemented(Context* ctx, uint32_t pc, uint32_t raw, const char* name) {
     fatal(ctx, pc, msg);
 }
 
+// Cutscene skip. The game has none, so START during a cutscene fast-forwards it:
+// the frame loop (f_00142870) updates the active cutscene player through a
+// virtual call update(this, dt) returning to 0x001429e4; while skipping, that
+// update runs many extra steps per frame, so the timeline and its script events
+// still play in order, just quickly. Player state +84 is 5 while it plays.
+static void cutscene_update(Context* ctx, RecompFn fn) {
+    static bool skipping = false, start_was_down = true;
+    const uint32_t player = ctx->r[4].u32[0];
+    const auto a0 = ctx->r[4];
+    const float dt = ctx->f[12];
+    const bool start = (g_pad0_buttons & 0x8) != 0;
+    if (start && !start_was_down) skipping = true;
+    start_was_down = start;
+    if (skipping) {
+        uint32_t state = 0;
+        std::memcpy(&state, guest_ptr(ctx, player + 84, 4), 4);
+        if (state != 5) skipping = false;
+    }
+    if (skipping) {
+        for (int i = 0; i < 40; ++i) {   // 40 x 50 ms of cutscene per frame
+            ctx->r[4] = a0;
+            ctx->f[12] = 0.05f;
+            ctx->r[31].u32[0] = 0x001429e4u;
+            fn(ctx);
+            uint32_t state = 0;
+            std::memcpy(&state, guest_ptr(ctx, player + 84, 4), 4);
+            if (state != 5) { skipping = false; return; }
+        }
+        ctx->r[4] = a0;
+        ctx->f[12] = dt;
+        ctx->r[31].u32[0] = 0x001429e4u;
+    }
+    fn(ctx);
+}
+
 void call_indirect(Context* ctx, uint32_t target) {
+    if (ctx->r[31].u32[0] == 0x001429e4u) {
+        if (RecompFn fn = lookup(target)) { cutscene_update(ctx, fn); return; }
+    }
     if (RecompFn fn = lookup(target)) { fn(ctx); return; }
     fatal(ctx, target, "call to address that is not a known function");
 }

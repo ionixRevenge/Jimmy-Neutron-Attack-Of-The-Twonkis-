@@ -13,10 +13,14 @@ add_library(ps2runtime STATIC
   runtime/src/kernel.cpp
   runtime/src/cop0.cpp
   runtime/src/hle_kernel.cpp
+  runtime/src/hle_video.cpp
+  runtime/src/video.cpp
   runtime/src/iop.cpp
   runtime/src/iop_services.cpp
   runtime/src/iop_cdvd.cpp
   runtime/src/iop_his.cpp
+  runtime/src/iop_irx.cpp
+  runtime/src/spu2.cpp
   runtime/src/iop_pad.cpp
   runtime/src/iop_mc.cpp
   runtime/src/iop_fileio.cpp
@@ -26,12 +30,18 @@ add_library(ps2runtime STATIC
   runtime/src/vif.cpp
   runtime/src/ipu.cpp
   runtime/src/profiler.cpp
+  runtime/src/perf.cpp
   runtime/src/vu1.cpp
   runtime/src/gif.cpp
   runtime/src/gs.cpp
+  runtime/src/gs_hw.cpp
+  runtime/src/texpack.cpp
   runtime/src/display.cpp
 )
 target_include_directories(ps2runtime PUBLIC runtime/include)
+if(TWONK_GENERATED_DIR)
+  target_include_directories(ps2runtime PRIVATE ${TWONK_GENERATED_DIR})   # vu1_aot_gen.inc (twonk --vu-aot)
+endif()
 if(MSVC)
   target_compile_options(ps2runtime PRIVATE /W4 /permissive- /Zi /FS)
 endif()

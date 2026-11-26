@@ -27,6 +27,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <set>
 #include <string>
@@ -34,6 +35,7 @@
 
 #include "disc.hpp"
 #include "iop.hpp"
+#include "iop_irx.hpp"
 #include "ps2/recomp.hpp"
 #include "ps2/runtime.hpp"
 
@@ -56,9 +58,15 @@ uint32_t open_file(Call& c) {
         std::fprintf(stderr, "[iop] his open %s: not found\n", path.c_str());
         return 0xFFFFFFFFu;
     }
-    g_files.push_back(f);
-    log(Log::Iop, "his open %s -> %zu (lba %u, %u bytes)", path.c_str(), g_files.size() - 1, f.lba, f.size);
-    return (uint32_t)(g_files.size() - 1);
+    // File ids are small and stable: the game indexes its own PAK size table
+    // (0x48d4a0, filled from fno 265) by id, and opens the same PAKs again and
+    // again without closing them. A fresh id per open runs off that table, the
+    // game reads a size of 0, and clamps every later read to a negative count.
+    uint32_t id = 0;
+    while (id < g_files.size() && g_files[id].lba != f.lba) ++id;
+    if (id == g_files.size()) g_files.push_back(f);
+    log(Log::Iop, "his open %s -> %u (lba %u, %u bytes)", path.c_str(), id, f.lba, f.size);
+    return id;
 }
 
 uint32_t file_size(uint32_t id) { return id < g_files.size() ? g_files[id].size : 0; }
@@ -75,6 +83,8 @@ uint32_t disc_read(Call& c) {
     if (count == 0 || count > 0x4000) {   // more than 32 MB: a request we misunderstand
         std::fprintf(stderr, "[iop] his read: bad request %08x %08x %08x %08x %08x %08x %08x\n", rd32(c.buff),
                      rd32(c.buff + 4), count, dest, to_iop, rd32(c.buff + 20), rd32(c.buff + 24));
+        static int traced;
+        if (traced++ < 2) dump_trace();
         return g_next_handle++;
     }
     const uint32_t bytes = count * 2048;
@@ -180,13 +190,70 @@ uint32_t his_rpc(Call& c) {
     return c.buff;
 }
 
+// ---- the real driver ------------------------------------------------------------------
+// HIS.IRX itself, in the R3000 interpreter (iop_irx.cpp): each RPC runs the module's
+// ProcessCommand(fno, rpcInData, size), exactly what its sceSifRpcLoop would do.
+uint32_t g_irx_start = 0, g_irx_process = 0, g_irx_in = 0;
+bool g_irx_started = false;
+
+uint32_t his_irx_rpc(Call& c) {
+    if (!g_irx_started) {   // module entry: creates its threads, the RPC loop, the sound thread
+        g_irx_started = true;
+        irx::call(c.ctx, g_irx_start, 0, 0, 0, 0);
+    }
+    const uint32_t size = std::min<uint32_t>(c.ssize, 0x800);
+    std::memmove(ram(g_irx_in, size), ram(c.buff, size), size);
+    const uint32_t out = irx::call(c.ctx, g_irx_process, c.fno, g_irx_in, c.ssize, 0);
+    if (c.fno == 513 && log_enabled(Log::Iop) && out) {   // voice status: log changes
+        static uint32_t last[8];
+        uint32_t now[8];
+        for (int i = 0; i < 8; ++i) now[i] = rd32(out + 4 * i);
+        if (std::memcmp(now, last, sizeof now)) {
+            std::memcpy(last, now, sizeof now);
+            log(Log::Iop, "his status %08x %08x %08x %08x %08x %08x %08x %08x", now[0], now[1], now[2], now[3], now[4], now[5], now[6], now[7]);
+        }
+    }
+    return out;
+}
+
+bool load_his_irx_impl() {
+    char* e = nullptr; size_t n = 0;
+    const bool native = _dupenv_s(&e, &n, "TWONK_HIS_NATIVE") == 0 && e && *e == 0x31;
+    std::free(e);
+    if (native) return false;
+    std::vector<uint8_t> image;
+    if (!read_game_file("cdrom0:\\MODULES\\HIS.IRX;1", &image) || !irx::load(image, "HIS.IRX")) return false;
+    g_irx_start = irx::symbol("start");
+    g_irx_process = irx::symbol("ProcessCommand__FUiPvi");
+    g_irx_in = irx::symbol("rpcInData");
+    if (!g_irx_start || !g_irx_process || !g_irx_in) {
+        std::fprintf(stderr, "[iop] HIS.IRX: symbols missing, using the silent driver\n");
+        return false;
+    }
+    return true;
+}
+
+bool load_his_irx() {
+    if (load_his_irx_impl()) return true;
+    std::fprintf(stderr, "[iop] HIS.IRX not run (TWONK_HIS_NATIVE, or not loadable): no sound\n");
+    return false;
+}
+
+// The module is loaded on the first call: by then the disc is open.
+int g_mode = 0;   // 0: not yet decided, 1: HIS.IRX, 2: native placeholder
+uint32_t his_dispatch(Call& c) {
+    if (!g_mode) g_mode = load_his_irx() ? 1 : 2;
+    return g_mode == 1 ? his_irx_rpc(c) : his_rpc(c);
+}
+
 } // namespace
 
 void register_his_service() {
     g_seen.clear();
     g_next_handle = 1;
     g_files.clear();
-    register_server(0x10000000, "HIS sound", 0x4000, his_rpc);
+    g_mode = 0;
+    register_server(0x10000000, "HIS sound", 0x4000, his_dispatch);
 }
 
 } // namespace ps2::iop
