@@ -43,7 +43,10 @@ Double-click **`Setup.cmd`**. The setup window:
    can install missing ones with `winget`;
 2. asks for your disc image and checks that it is the supported version;
 3. moves it into `Game iso/` (or copies it, if you choose), then runs every build
-   step below and can add a desktop shortcut.
+   step below and can add a desktop shortcut;
+4. finally runs the game for about a minute without a window to take a few
+   screenshots, which become the setup window's background. They are made from
+   your disc, stay in `local/setup_art/`, and are never committed.
 
 The build takes a while. Progress is shown in the window and saved to
 `local/logs/setup.log`. Without the window:
